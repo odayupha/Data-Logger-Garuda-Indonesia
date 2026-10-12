@@ -24,7 +24,7 @@ from PIL import Image
 import openpyxl
 
 # ── local ────────────────────────────────────────────────────────────
-from serial_handler import SerialReader, list_com_ports
+from serial_handler import SerialReader, EthernetReader, list_com_ports
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -34,7 +34,15 @@ APP_TITLE = "Flap Sensor Data Logger — API 8810A"
 APP_SIZE = "1100x780"
 DEFAULT_START_ROW = 11
 RESULT_COLUMN = "G"           # Column G = "RESULT"
-DEFAULT_COMMAND = "READ?"
+DEFAULT_COMMAND = "API1AVG_ANGLE?"
+PRESET_COMMANDS = [
+    "API1AVG_ANGLE?  (CH1 Angle — Native NAI)",
+    "API2AVG_ANGLE?  (CH2 Angle — Native NAI)",
+    "*IDN?  (Ping / Model ID)",
+    "MEAS:ANG?  (SCPI Angle)",
+    "FETC:ANG? CH1  (SCPI CH1)",
+    "READ?  (Legacy Read)",
+]
 POLL_INTERVAL_MS = 1000      
 LOGO_FILENAME = "logo.png"
 
@@ -116,7 +124,8 @@ class FlapSensorApp(ctk.CTk):
         self._set_icon()
 
         # ── Application state ────────────────────────────────────────
-        self._serial_reader: SerialReader | None = None
+        self._reader: SerialReader | EthernetReader | None = None
+        self._serial_reader = None  # Backward-compatibility alias
         self._live_value: float | None = None
         self._current_row: int = DEFAULT_START_ROW
         self._workbook: openpyxl.Workbook | None = None
@@ -125,9 +134,13 @@ class FlapSensorApp(ctk.CTk):
         self._save_count: int = 0
 
         # Tkinter variables
+        self._var_conn_type = StringVar(value="ETHERNET")
+        self._var_ip = StringVar(value="192.168.1.10")
+        self._var_port_tcp = StringVar(value="23")
         self._var_port = StringVar(value="— select —")
         self._var_baud = StringVar(value="9600")
         self._var_cmd = StringVar(value=DEFAULT_COMMAND)
+        self._var_preset_cmd = StringVar(value=PRESET_COMMANDS[0])
         self._var_sim = BooleanVar(value=False)
         self._var_sheet = StringVar(value="— load Excel first —")
 
@@ -263,17 +276,68 @@ class FlapSensorApp(ctk.CTk):
 
         self._build_log_card(right)
 
-    # ── Serial Card ──────────────────────────────────────────────────
+    # ── Device Connection Card ───────────────────────────────────────
     def _build_serial_card(self, parent):
-        card = CardFrame(parent, title="🔌  SERIAL CONNECTION")
+        card = CardFrame(parent, title="🔌  INSTRUMENT CONNECTION")
         card.pack(fill="x", pady=(0, 8))
 
         pad = dict(padx=16, pady=(2, 2))
 
-        # COM Port
-        ctk.CTkLabel(card, text="COM Port", font=ctk.CTkFont(size=12),
+        # Mode Selector: Ethernet (Recommended) vs Serial
+        self._seg_mode = ctk.CTkSegmentedButton(
+            card,
+            values=["🌐 Ethernet (LAN)", "🔌 Serial (COM)"],
+            command=self._on_conn_type_changed,
+            selected_color=CLR_PRIMARY,
+            selected_hover_color=CLR_PRIMARY_HVR,
+            unselected_color=CLR_LIVE_BG,
+            unselected_hover_color=CLR_BORDER,
+            text_color=CLR_TEXT_DARK,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self._seg_mode.set("🌐 Ethernet (LAN)")
+        self._seg_mode.pack(fill="x", padx=16, pady=(0, 8))
+
+        # --- ETHERNET FRAME ---
+        self._frame_ethernet = ctk.CTkFrame(card, fg_color="transparent")
+        self._frame_ethernet.pack(fill="x", padx=16, pady=(0, 6))
+
+        ip_lbl_row = ctk.CTkFrame(self._frame_ethernet, fg_color="transparent")
+        ip_lbl_row.pack(fill="x")
+        ctk.CTkLabel(ip_lbl_row, text="IP Address NAI 8810A", font=ctk.CTkFont(size=12),
+                     text_color=CLR_TEXT_MID).pack(side="left")
+        ctk.CTkLabel(ip_lbl_row, text="Port", font=ctk.CTkFont(size=12),
+                     text_color=CLR_TEXT_MID).pack(side="right", padx=(0, 24))
+
+        ip_inputs = ctk.CTkFrame(self._frame_ethernet, fg_color="transparent")
+        ip_inputs.pack(fill="x", pady=(2, 2))
+
+        self._entry_ip = ctk.CTkEntry(
+            ip_inputs, textvariable=self._var_ip, width=175,
+            border_color=CLR_BORDER, fg_color=CLR_LIVE_BG,
+            text_color=CLR_TEXT_DARK, placeholder_text="192.168.1.10",
+        )
+        self._entry_ip.pack(side="left")
+
+        self._entry_port_tcp = ctk.CTkEntry(
+            ip_inputs, textvariable=self._var_port_tcp, width=75,
+            border_color=CLR_BORDER, fg_color=CLR_LIVE_BG,
+            text_color=CLR_TEXT_DARK, placeholder_text="23",
+        )
+        self._entry_port_tcp.pack(side="right")
+
+        ctk.CTkLabel(
+            self._frame_ethernet,
+            text="TCP Port 23 · Handshake 'NAII' otomatis",
+            font=ctk.CTkFont(size=11), text_color=CLR_TEXT_LIGHT,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # --- SERIAL FRAME (hidden by default) ---
+        self._frame_serial = ctk.CTkFrame(card, fg_color="transparent")
+
+        ctk.CTkLabel(self._frame_serial, text="COM Port", font=ctk.CTkFont(size=12),
                      text_color=CLR_TEXT_MID).pack(anchor="w", **pad)
-        port_frame = ctk.CTkFrame(card, fg_color="transparent")
+        port_frame = ctk.CTkFrame(self._frame_serial, fg_color="transparent")
         port_frame.pack(fill="x", padx=16, pady=(0, 6))
 
         ports = list_com_ports() or ["— none detected —"]
@@ -292,25 +356,48 @@ class FlapSensorApp(ctk.CTk):
         )
         btn_refresh.pack(side="left", padx=(6, 0))
 
-        # Baud Rate
-        ctk.CTkLabel(card, text="Baud Rate", font=ctk.CTkFont(size=12),
+        ctk.CTkLabel(self._frame_serial, text="Baud Rate", font=ctk.CTkFont(size=12),
                      text_color=CLR_TEXT_MID).pack(anchor="w", **pad)
         self._combo_baud = ctk.CTkOptionMenu(
-            card, variable=self._var_baud, values=["9600", "19200", "115200"],
+            self._frame_serial, variable=self._var_baud, values=["9600", "19200", "115200"],
             width=160, fg_color=CLR_LIVE_BG, button_color=CLR_PRIMARY,
             text_color=CLR_TEXT_DARK, dropdown_fg_color=CLR_CARD,
         )
         self._combo_baud.pack(anchor="w", padx=16, pady=(0, 6))
 
-        # Command
-        ctk.CTkLabel(card, text="Query Command", font=ctk.CTkFont(size=12),
-                     text_color=CLR_TEXT_MID).pack(anchor="w", **pad)
-        self._entry_cmd = ctk.CTkEntry(
-            card, textvariable=self._var_cmd, width=260,
-            border_color=CLR_BORDER, fg_color=CLR_LIVE_BG,
-            text_color=CLR_TEXT_DARK, placeholder_text="READ?",
+        # --- COMMON CONTROLS ---
+        self._lbl_preset_cmd = ctk.CTkLabel(card, text="Preset Command", font=ctk.CTkFont(size=12),
+                                            text_color=CLR_TEXT_MID)
+        self._lbl_preset_cmd.pack(anchor="w", **pad)
+
+        self._combo_preset_cmd = ctk.CTkOptionMenu(
+            card, variable=self._var_preset_cmd, values=PRESET_COMMANDS,
+            width=260, fg_color=CLR_LIVE_BG, button_color=CLR_PRIMARY,
+            text_color=CLR_TEXT_DARK, dropdown_fg_color=CLR_CARD,
+            command=self._on_preset_cmd_changed,
         )
-        self._entry_cmd.pack(anchor="w", padx=16, pady=(0, 8))
+        self._combo_preset_cmd.pack(anchor="w", padx=16, pady=(0, 6))
+
+        # Raw Query Command + Quick Test Button
+        ctk.CTkLabel(card, text="Active Command", font=ctk.CTkFont(size=12),
+                     text_color=CLR_TEXT_MID).pack(anchor="w", **pad)
+        cmd_row = ctk.CTkFrame(card, fg_color="transparent")
+        cmd_row.pack(fill="x", padx=16, pady=(0, 8))
+
+        self._entry_cmd = ctk.CTkEntry(
+            cmd_row, textvariable=self._var_cmd, width=175,
+            border_color=CLR_BORDER, fg_color=CLR_LIVE_BG,
+            text_color=CLR_TEXT_DARK, placeholder_text="API1AVG_ANGLE?",
+        )
+        self._entry_cmd.pack(side="left")
+
+        self._btn_test_cmd = ctk.CTkButton(
+            cmd_row, text="⚡ Test", width=75, height=32,
+            fg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HVR,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_test_query,
+        )
+        self._btn_test_cmd.pack(side="left", padx=(8, 0))
 
         # Simulator checkbox
         self._chk_sim = ctk.CTkCheckBox(
@@ -535,6 +622,18 @@ class FlapSensorApp(ctk.CTk):
     # ═════════════════════════════════════════════════════════════════
     #  CALLBACKS — Serial
     # ═════════════════════════════════════════════════════════════════
+    def _on_conn_type_changed(self, choice: str):
+        """Toggle between Ethernet and Serial configuration inputs."""
+        if "Ethernet" in choice:
+            self._var_conn_type.set("ETHERNET")
+            self._frame_serial.pack_forget()
+            self._frame_ethernet.pack(fill="x", padx=16, pady=(0, 6), before=self._lbl_preset_cmd)
+        else:
+            self._var_conn_type.set("SERIAL")
+            self._frame_ethernet.pack_forget()
+            self._frame_serial.pack(fill="x", padx=16, pady=(0, 6), before=self._lbl_preset_cmd)
+        self._log(f"Connection mode switched to: {self._var_conn_type.get()}")
+
     def _refresh_ports(self):
         ports = list_com_ports() or ["— none detected —"]
         self._combo_port.configure(values=ports)
@@ -542,42 +641,145 @@ class FlapSensorApp(ctk.CTk):
             self._var_port.set(ports[0])
         self._log("Ports refreshed: " + ", ".join(ports))
 
-    def _connect_serial(self):
-        port = self._var_port.get()
-        baud = int(self._var_baud.get())
-        cmd = self._var_cmd.get()  # sanitised inside SerialReader
+    def _on_preset_cmd_changed(self, choice: str):
+        """Update the active command entry when a preset is chosen."""
+        cmd_token = choice.split()[0].strip()
+        self._var_cmd.set(cmd_token)
+        self._log(f"Preset command selected: '{cmd_token}'")
+
+    def _on_test_query(self):
+        """Send a one-shot query to test communication and log the raw response."""
+        conn_type = self._var_conn_type.get()
+        cmd = self._var_cmd.get().strip()
         sim = self._var_sim.get()
 
-        if not sim and port.startswith("—"):
-            messagebox.showwarning("No Port", "Pilih COM Port terlebih dahulu\natau aktifkan Simulator Mode.")
+        if sim:
+            self._log(f"⚡ [Simulator] Test '{cmd}' ➔ '24.50' (Simulated)")
             return
 
-        self._serial_reader = SerialReader(
-            port=port,
-            baudrate=baud,
-            command=cmd,
-            interval=POLL_INTERVAL_MS / 1000.0,
-            on_data=self._on_serial_data,
-            on_error=self._on_serial_error,
-            on_log=self._on_serial_log,
-            simulator=sim,
-        )
-        self._serial_reader.connect()
+        def worker():
+            if self._reader and self._reader.is_connected:
+                raw = self._reader.query_raw(cmd)
+            elif conn_type == "ETHERNET":
+                ip = self._var_ip.get().strip()
+                try:
+                    port = int(self._var_port_tcp.get().strip())
+                except ValueError:
+                    port = 23
+                self.after(0, self._log, f"⚡ Testing query '{cmd}' on Ethernet {ip}:{port}...")
+                raw = EthernetReader.test_single_query(ip, port, cmd)
+            else:
+                port = self._var_port.get()
+                try:
+                    baud = int(self._var_baud.get())
+                except ValueError:
+                    baud = 9600
+                if port.startswith("—"):
+                    self.after(0, messagebox.showwarning, "No Port", "Pilih COM Port terlebih dahulu.")
+                    return
+                self.after(0, self._log, f"⚡ Testing query '{cmd}' on {port} @ {baud} baud...")
+                import serial
+                try:
+                    s = serial.Serial(port=port, baudrate=baud, timeout=1.8)
+                    s.dtr = True
+                    s.rts = True
+                    time.sleep(0.12)
+                    s.reset_input_buffer()
+                    wire_bytes = f"{cmd}\r\n".encode("ascii", errors="ignore")
+                    s.write(wire_bytes)
+                    
+                    buf = bytearray()
+                    start = time.time()
+                    while time.time() - start < 1.8:
+                        ch = s.read(1)
+                        if not ch:
+                            break
+                        buf.extend(ch)
+                        if ch in (b"\n", b"\r"):
+                            time.sleep(0.015)
+                            if s.in_waiting:
+                                buf.extend(s.read(s.in_waiting))
+                            break
+                    s.close()
+                    raw = buf.decode("ascii", errors="ignore").strip() if buf else "[No reply / Timeout]"
+                except Exception as exc:
+                    raw = f"[Port Error: {exc}]"
+
+            # Parse and log result
+            val = SerialReader._parse_angle(raw)
+            if val is not None:
+                msg = f"📥 Reply: '{raw}' ➔ Angle: {val:.2f}°"
+            else:
+                msg = f"📥 Reply: '{raw}'"
+            self.after(0, self._log, msg)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _connect_serial(self):
+        conn_type = self._var_conn_type.get()
+        cmd = self._var_cmd.get()
+        sim = self._var_sim.get()
+
+        if conn_type == "ETHERNET":
+            ip = self._var_ip.get().strip()
+            try:
+                port = int(self._var_port_tcp.get().strip())
+            except ValueError:
+                port = 23
+            if not sim and not ip:
+                messagebox.showwarning("No IP", "Masukkan IP Address NAI 8810A terlebih dahulu.")
+                return
+
+            self._reader = EthernetReader(
+                host=ip,
+                port=port,
+                command=cmd,
+                interval=POLL_INTERVAL_MS / 1000.0,
+                on_data=self._on_serial_data,
+                on_error=self._on_serial_error,
+                on_log=self._on_serial_log,
+                simulator=sim,
+            )
+            mode_desc = "SIMULATOR" if sim else f"Ethernet {ip}:{port}"
+        else:
+            port = self._var_port.get()
+            try:
+                baud = int(self._var_baud.get())
+            except ValueError:
+                baud = 9600
+            if not sim and port.startswith("—"):
+                messagebox.showwarning("No Port", "Pilih COM Port terlebih dahulu\natau aktifkan Simulator Mode.")
+                return
+
+            self._reader = SerialReader(
+                port=port,
+                baudrate=baud,
+                command=cmd,
+                interval=POLL_INTERVAL_MS / 1000.0,
+                on_data=self._on_serial_data,
+                on_error=self._on_serial_error,
+                on_log=self._on_serial_log,
+                simulator=sim,
+            )
+            mode_desc = "SIMULATOR" if sim else f"{port} @ {baud}"
+
+        self._serial_reader = self._reader
+        self._reader.connect()
 
         # UI state
         self._btn_connect.configure(state="disabled")
         self._btn_disconnect.configure(state="normal")
         self._status_dot.set_state("on")
-        mode = "SIMULATOR" if sim else port
-        self._lbl_status.configure(text=f"Connected ({mode})", text_color=CLR_SUCCESS)
-        self._lbl_footer_status.configure(text=f"Connected — {mode} @ {baud} baud")
-        self._log(f"Connected: {mode} @ {baud} baud")
+        self._lbl_status.configure(text=f"Connected ({mode_desc})", text_color=CLR_SUCCESS)
+        self._lbl_footer_status.configure(text=f"Connected — {mode_desc}")
+        self._log(f"Connected: {mode_desc}")
         self._log(f"Query command: '{cmd}' (terminator \\r\\n added automatically)")
 
     def _disconnect_serial(self):
-        if self._serial_reader:
-            self._serial_reader.disconnect()
-            self._serial_reader = None
+        if self._reader:
+            self._reader.disconnect()
+            self._reader = None
+        self._serial_reader = None
 
         self._btn_connect.configure(state="normal")
         self._btn_disconnect.configure(state="disabled")
@@ -758,8 +960,9 @@ class FlapSensorApp(ctk.CTk):
     #  HELPERS
     # ═════════════════════════════════════════════════════════════════
     def _find_logo(self) -> str | None:
-        """Search for logo.png next to the executable / script."""
+        """Search for logo.png next to the executable / script / PyInstaller bundle."""
         candidates = [
+            Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / LOGO_FILENAME,
             Path(__file__).parent / LOGO_FILENAME,
             Path(sys.executable).parent / LOGO_FILENAME,
             Path.cwd() / LOGO_FILENAME,
@@ -771,7 +974,9 @@ class FlapSensorApp(ctk.CTk):
 
     def _on_close(self):
         """Clean shutdown."""
-        if self._serial_reader and self._serial_reader.is_connected:
+        if self._reader and self._reader.is_connected:
+            self._reader.disconnect()
+        elif self._serial_reader and self._serial_reader.is_connected:
             self._serial_reader.disconnect()
         self.destroy()
 

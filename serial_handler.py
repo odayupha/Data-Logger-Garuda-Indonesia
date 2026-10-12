@@ -22,6 +22,7 @@ Rev    : 2.0  (2026-10-09) – full refactor for reliable NAI 8810A comms
 """
 
 import re
+import socket
 import threading
 import time
 import random
@@ -31,9 +32,9 @@ import serial
 import serial.tools.list_ports
 
 
-# Compiled regex: matches an optional minus sign, digits, optional
-# decimal point + more digits.  Covers "2.427", "-0.15", "274.926000".
-_RE_FLOAT = re.compile(r"-?\d+\.?\d*")
+# Compiled regex: matches an optional sign, digits, optional
+# decimal point + more digits.  Covers "+2.427", "-0.15", "274.926000".
+_RE_FLOAT = re.compile(r"[-+]?\d+\.?\d*")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ class SerialReader:
     ----------
     port : str          – COM port name (e.g. "COM3").
     baudrate : int      – Baud rate (typically 9600).
-    command : str       – Primary query command (e.g. "MEASure:ANGle?").
+    command : str       – Primary query command (e.g. "API1AVG_ANGLE?").
     interval : float    – Seconds between queries (default 0.5).
     on_data : callable  – Callback ``on_data(value: float)`` invoked
                           from the worker thread; the GUI should schedule
@@ -105,27 +106,25 @@ class SerialReader:
                     bytesize=serial.EIGHTBITS,
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE,
-                    timeout=2.0,           # read timeout 2.0 s
+                    timeout=1.5,           # read timeout 1.5 s
                     write_timeout=1.0,     # write timeout 1.0 s
                     xonxoff=False,
                     rtscts=False,
                     dsrdtr=False,
                 )
                 
-                # CRITICAL: Activate DTR & RTS to wake up FTDI chip / NAI 8810A
+                # Activate DTR & RTS for FTDI / USB-serial interfaces
                 self._serial.dtr = True
                 self._serial.rts = True
                 
-                # Allow the FTDI / USB-serial adapter to settle after activating signals
-                time.sleep(0.2)
+                time.sleep(0.15)
 
-                # Drain any boot-up garbage from the device
+                # Drain any initial garbage
                 self._serial.reset_input_buffer()
                 self._serial.reset_output_buffer()
 
                 self._log_info(
-                    f"Port {self.port} opened: {self.baudrate} 8N1, "
-                    f"timeout=1.5 s"
+                    f"Port {self.port} opened: {self.baudrate} 8N1, timeout=1.5 s"
                 )
             except serial.SerialException as exc:
                 if self.on_error:
@@ -147,7 +146,6 @@ class SerialReader:
         with self._lock:
             if self._serial is not None and self._serial.is_open:
                 try:
-                    # SAFE CLOSE: reset buffers before closing to prevent PermissionError on reconnect
                     self._serial.reset_input_buffer()
                     self._serial.reset_output_buffer()
                     self._serial.close()
@@ -174,11 +172,9 @@ class SerialReader:
                     if self.on_data:
                         self.on_data(value)
                 else:
-                    # No valid data received
-                    self._log_info("Empty response (timeout) or invalid format")
+                    self._log_info("No data / timeout (waiting for 8810A reply)")
 
             except serial.SerialException as exc:
-                # Port-level error (cable unplugged, etc.)
                 if self.on_error:
                     self.on_error(f"Serial I/O error: {exc}")
 
@@ -186,65 +182,97 @@ class SerialReader:
                 if self.on_error:
                     self.on_error(f"Unexpected: {exc}")
 
-            # ── Interruptible sleep (check every 50 ms) ─────────────
+            # Interruptible sleep
             waited = 0.0
             while waited < self.interval and self._running.is_set():
                 time.sleep(0.05)
                 waited += 0.05
 
     # ══════════════════════════════════════════════════════════════════
+    #  READ HELPERS
+    # ══════════════════════════════════════════════════════════════════
+    def _read_response(self, timeout: float = 1.5) -> bytes:
+        """
+        Read until newline (\\n) or carriage return (\\r), supporting both
+        \\r\\n and single \\r or \\n delimiters without hanging for full timeout.
+        """
+        if self._serial is None or not self._serial.is_open:
+            return b""
+        
+        start = time.time()
+        buf = bytearray()
+        while time.time() - start < timeout:
+            ch = self._serial.read(1)
+            if not ch:
+                break
+            buf.extend(ch)
+            if ch in (b"\n", b"\r"):
+                # If \\r arrived, read trailing \\n if immediately present
+                time.sleep(0.015)
+                if self._serial.in_waiting:
+                    next_ch = self._serial.read(1)
+                    buf.extend(next_ch)
+                break
+        return bytes(buf)
+
+    # ══════════════════════════════════════════════════════════════════
     #  QUERY THE REAL DEVICE
     # ══════════════════════════════════════════════════════════════════
     def _query_device(self) -> Optional[float]:
-        """
-        Send the active command to the API 8810A and parse the reply.
-
-        Protocol sequence:
-          1. Flush input buffer  → discard stale / buffered data
-          2. Write command + \\r\\n terminator
-          3. readline()          → read until \\n or timeout
-          4. Parse numeric float from response
-        """
+        """Send the active command to the API 8810A and parse the reply."""
         with self._lock:
             if self._serial is None or not self._serial.is_open:
                 return None
 
             try:
-                # ① Flush stale data from the receive buffer
                 self._serial.reset_input_buffer()
-
-                # ② Build and send the command with proper terminator
                 cmd_clean = self._sanitise_command(self.command)
                 wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
                 self._serial.write(wire_bytes)
-
-                # ③ Read the response line (blocks up to timeout)
-                raw_bytes = self._serial.readline()
-
+                raw_bytes = self._read_response(timeout=1.5)
             except serial.SerialException:
-                raise  # let poll_loop handle it
+                raise
             except Exception as exc:
                 self._log_info(f"Write/Read error: {exc}")
                 return None
 
-        # ── Decode and strip outside the lock ────────────────────────
         if not raw_bytes:
-            self._log_info("Empty response (timeout)")
+            self._log_info(f"Command '{cmd_clean}': No reply (timeout)")
             return None
 
         raw_str = raw_bytes.decode("ascii", errors="ignore").strip()
 
         if not raw_str:
-            self._log_info("Blank response after strip")
+            self._log_info(f"Command '{cmd_clean}': Blank response")
             return None
 
-        # ④ Parse the numeric value
+        # Parse the numeric value
         value = self._parse_angle(raw_str)
 
         if value is None:
-            self._log_info(f"Unparseable response: '{raw_str}'")
+            self._log_info(f"Raw reply: '{raw_str}' (Non-numeric response)")
 
         return value
+
+    def query_raw(self, cmd: str) -> str:
+        """
+        Send a one-shot query to the 8810A and return the exact raw response string.
+        Thread-safe; can be called for diagnostics.
+        """
+        with self._lock:
+            if self._serial is None or not self._serial.is_open:
+                return "[Port not connected]"
+            try:
+                self._serial.reset_input_buffer()
+                cmd_clean = self._sanitise_command(cmd)
+                wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
+                self._serial.write(wire_bytes)
+                raw_bytes = self._read_response(timeout=1.8)
+                if not raw_bytes:
+                    return "[No reply / Timeout]"
+                return raw_bytes.decode("ascii", errors="ignore").strip()
+            except Exception as exc:
+                return f"[Error: {exc}]"
 
     # ══════════════════════════════════════════════════════════════════
     #  PARSING
@@ -315,3 +343,265 @@ class SerialReader:
     @property
     def is_connected(self) -> bool:
         return self._running.is_set()
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  EthernetReader – TCP/IP socket reader for the API 8810A
+# ──────────────────────────────────────────────────────────────────────
+class EthernetReader:
+    """
+    Manages a TCP/IP socket connection to the API 8810A over Ethernet (LAN).
+
+    Protocol details:
+      • Connects to target IP and port (default 23 / Telnet).
+      • Performs NAI authentication handshake: sends "NAII\\r\\n".
+      • Continuously queries angle commands (e.g. "API1AVG_ANGLE?\\r\\n").
+      • Receives ASCII angle string (e.g. "2.427\\r\\n").
+    """
+
+    def __init__(
+        self,
+        host: str = "192.168.1.10",
+        port: int = 23,
+        command: str = "API1AVG_ANGLE?",
+        interval: float = 0.5,
+        on_data: Optional[Callable[[float], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        on_log: Optional[Callable[[str], None]] = None,
+        simulator: bool = False,
+    ):
+        self.host = host.strip()
+        self.port = int(port)
+        self.command = SerialReader._sanitise_command(command)
+        self.interval = interval
+        self.on_data = on_data
+        self.on_error = on_error
+        self.on_log = on_log
+        self.simulator = simulator
+
+        self._socket: Optional[socket.socket] = None
+        self._thread: Optional[threading.Thread] = None
+        self._running = threading.Event()
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        """Open TCP/IP socket connection and begin polling."""
+        if self._running.is_set():
+            return
+
+        if not self.simulator:
+            try:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._socket.settimeout(3.0)
+                self._log_info(f"Connecting to NAI 8810A at {self.host}:{self.port}...")
+                self._socket.connect((self.host, self.port))
+
+                # Step 1: Send NAI Ethernet login handshake
+                self._socket.sendall(b"NAII\r\n")
+                time.sleep(0.15)
+
+                # Read optional login banner without blocking long
+                try:
+                    self._socket.settimeout(0.5)
+                    banner = self._socket.recv(1024)
+                    if banner:
+                        banner_str = banner.decode("ascii", errors="ignore").strip()
+                        self._log_info(f"NAI 8810A handshake acknowledged: '{banner_str}'")
+                except socket.timeout:
+                    pass
+                finally:
+                    self._socket.settimeout(2.0)
+
+                self._log_info(f"Ethernet connection established: {self.host}:{self.port}")
+            except Exception as exc:
+                if self._socket:
+                    try:
+                        self._socket.close()
+                    except Exception:
+                        pass
+                    self._socket = None
+                if self.on_error:
+                    self.on_error(f"Ethernet connection error ({self.host}:{self.port}): {exc}")
+                return
+
+        self._running.set()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def disconnect(self) -> None:
+        """Stop polling and close the TCP socket."""
+        self._running.clear()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+
+        with self._lock:
+            if self._socket is not None:
+                try:
+                    self._socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    self._socket.close()
+                except Exception:
+                    pass
+                self._socket = None
+
+    def _poll_loop(self) -> None:
+        """Continuously send the query and parse responses."""
+        sim_angle = random.uniform(0.0, 360.0)
+
+        while self._running.is_set():
+            try:
+                if self.simulator:
+                    value = SerialReader._simulate(sim_angle)
+                    sim_angle = value
+                else:
+                    value = self._query_device()
+
+                if value is not None:
+                    if self.on_data:
+                        self.on_data(value)
+                else:
+                    self._log_info("No data / timeout (waiting for 8810A reply)")
+
+            except Exception as exc:
+                if self.on_error:
+                    self.on_error(f"Ethernet I/O error: {exc}")
+
+            waited = 0.0
+            while waited < self.interval and self._running.is_set():
+                time.sleep(0.05)
+                waited += 0.05
+
+    def _read_response(self, timeout: float = 2.0) -> bytes:
+        """Read until newline or carriage return from socket."""
+        if self._socket is None:
+            return b""
+        self._socket.settimeout(timeout)
+        start = time.time()
+        buf = bytearray()
+        while time.time() - start < timeout:
+            try:
+                ch = self._socket.recv(1)
+                if not ch:
+                    break
+                buf.extend(ch)
+                if ch in (b"\n", b"\r"):
+                    # Drain any trailing byte (\r or \n) immediately
+                    time.sleep(0.01)
+                    self._socket.setblocking(False)
+                    try:
+                        extra = self._socket.recv(64)
+                        if extra:
+                            buf.extend(extra)
+                    except BlockingIOError:
+                        pass
+                    finally:
+                        self._socket.setblocking(True)
+                    break
+            except socket.timeout:
+                break
+            except Exception:
+                break
+        return bytes(buf)
+
+    def _query_device(self) -> Optional[float]:
+        """Send query to the API 8810A via TCP socket and parse reply."""
+        with self._lock:
+            if self._socket is None:
+                return None
+            try:
+                cmd_clean = SerialReader._sanitise_command(self.command)
+                wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
+                self._socket.sendall(wire_bytes)
+                raw_bytes = self._read_response(timeout=2.0)
+            except Exception as exc:
+                self._log_info(f"Socket write/read error: {exc}")
+                return None
+
+        if not raw_bytes:
+            self._log_info(f"Command '{cmd_clean}': No reply (timeout)")
+            return None
+
+        raw_str = raw_bytes.decode("ascii", errors="ignore").strip()
+        if not raw_str:
+            return None
+
+        return SerialReader._parse_angle(raw_str)
+
+    def query_raw(self, cmd: str) -> str:
+        """Send a one-shot query to the 8810A over the active socket."""
+        with self._lock:
+            if self._socket is None:
+                return "[Socket not connected]"
+            try:
+                cmd_clean = SerialReader._sanitise_command(cmd)
+                wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
+                self._socket.sendall(wire_bytes)
+                raw_bytes = self._read_response(timeout=2.0)
+                if not raw_bytes:
+                    return "[No reply / Timeout]"
+                return raw_bytes.decode("ascii", errors="ignore").strip()
+            except Exception as exc:
+                return f"[Socket Error: {exc}]"
+
+    @classmethod
+    def test_single_query(cls, host: str, port: int, cmd: str, timeout: float = 2.5) -> str:
+        """Standalone one-shot query test via TCP socket without continuous connection."""
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect((host.strip(), int(port)))
+
+            # Step 1: NAI login handshake
+            s.sendall(b"NAII\r\n")
+            time.sleep(0.12)
+            try:
+                s.settimeout(0.4)
+                s.recv(1024)
+            except socket.timeout:
+                pass
+
+            # Step 2: Query command
+            s.settimeout(timeout)
+            cmd_clean = SerialReader._sanitise_command(cmd)
+            wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
+            s.sendall(wire_bytes)
+
+            buf = bytearray()
+            start = time.time()
+            while time.time() - start < timeout:
+                ch = s.recv(1)
+                if not ch:
+                    break
+                buf.extend(ch)
+                if ch in (b"\n", b"\r"):
+                    time.sleep(0.01)
+                    s.setblocking(False)
+                    try:
+                        extra = s.recv(64)
+                        if extra:
+                            buf.extend(extra)
+                    except BlockingIOError:
+                        pass
+                    break
+            return buf.decode("ascii", errors="ignore").strip() if buf else "[No reply / Timeout]"
+        except Exception as exc:
+            return f"[Socket Error: {exc}]"
+        finally:
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    @property
+    def is_connected(self) -> bool:
+        return self._running.is_set()
+
+    def _log_info(self, msg: str) -> None:
+        if self.on_log:
+            self.on_log(msg)
+
