@@ -71,8 +71,8 @@ class SerialReader:
         self,
         port: str,
         baudrate: int,
-        command: str,
-        interval: float = 0.5,
+        command: str = "API1 ANGLE?",
+        interval: float = 0.03,
         on_data: Optional[Callable[[float], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
@@ -106,7 +106,7 @@ class SerialReader:
                     bytesize=serial.EIGHTBITS,
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE,
-                    timeout=1.5,           # read timeout 1.5 s
+                    timeout=0.6,           # responsive read timeout 0.6 s
                     write_timeout=1.0,     # write timeout 1.0 s
                     xonxoff=False,
                     rtscts=False,
@@ -182,19 +182,22 @@ class SerialReader:
                 if self.on_error:
                     self.on_error(f"Unexpected: {exc}")
 
-            # Interruptible sleep
-            waited = 0.0
-            while waited < self.interval and self._running.is_set():
-                time.sleep(0.05)
-                waited += 0.05
+            # Minimal sleep for real-time responsiveness without pegging CPU
+            if self.interval > 0:
+                waited = 0.0
+                step = min(0.01, self.interval)
+                while waited < self.interval and self._running.is_set():
+                    time.sleep(step)
+                    waited += step
+            else:
+                time.sleep(0.002)
 
     # ══════════════════════════════════════════════════════════════════
     #  READ HELPERS
     # ══════════════════════════════════════════════════════════════════
-    def _read_response(self, timeout: float = 1.5) -> bytes:
+    def _read_response(self, timeout: float = 0.6) -> bytes:
         """
-        Read until newline (\\n) or carriage return (\\r), supporting both
-        \\r\\n and single \\r or \\n delimiters without hanging for full timeout.
+        Read until newline (\\n) or carriage return (\\r) without artificial delays.
         """
         if self._serial is None or not self._serial.is_open:
             return b""
@@ -202,16 +205,12 @@ class SerialReader:
         start = time.time()
         buf = bytearray()
         while time.time() - start < timeout:
-            ch = self._serial.read(1)
-            if not ch:
+            in_w = self._serial.in_waiting
+            chunk = self._serial.read(in_w if in_w > 0 else 1)
+            if not chunk:
                 break
-            buf.extend(ch)
-            if ch in (b"\n", b"\r"):
-                # If \\r arrived, read trailing \\n if immediately present
-                time.sleep(0.015)
-                if self._serial.in_waiting:
-                    next_ch = self._serial.read(1)
-                    buf.extend(next_ch)
+            buf.extend(chunk)
+            if b"\n" in buf or b"\r" in buf:
                 break
         return bytes(buf)
 
@@ -229,7 +228,7 @@ class SerialReader:
                 cmd_clean = self._sanitise_command(self.command)
                 wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
                 self._serial.write(wire_bytes)
-                raw_bytes = self._read_response(timeout=1.5)
+                raw_bytes = self._read_response(timeout=0.6)
             except serial.SerialException:
                 raise
             except Exception as exc:
@@ -285,19 +284,29 @@ class SerialReader:
         The API 8810A typically replies with a plain ASCII float:
             "2.427"   "274.926000"   "-0.05"
 
-        Returns the value rounded to 2 decimal places, or None.
+        Returns the value as full-precision float without premature rounding, or None.
         """
-        # First try: direct float conversion (fastest path)
+        if not text:
+            return None
+
+        # Filter out text errors, banners, and acknowledgments
+        upper = text.upper()
+        if any(err_kw in upper for err_kw in ("ERROR", "NORTH", "ATLANTIC", "NAI", "OK")):
+            return None
+
+        text_clean = text.strip().replace("°", "").replace("DEG", "").strip()
+
+        # First try: direct float conversion (fastest path, retains native precision)
         try:
-            return round(float(text), 2)
+            return float(text_clean)
         except (ValueError, TypeError):
             pass
 
-        # Second try: regex extraction (handles prefixed/suffixed data)
-        match = _RE_FLOAT.search(text)
+        # Second try: regex extraction (only if isolated or cleanly delimited)
+        match = _RE_FLOAT.search(text_clean)
         if match:
             try:
-                return round(float(match.group()), 2)
+                return float(match.group())
             except (ValueError, TypeError):
                 pass
 
@@ -308,8 +317,8 @@ class SerialReader:
     # ══════════════════════════════════════════════════════════════════
     @staticmethod
     def _simulate(current: float) -> float:
-        """Generate a slowly drifting simulated angle value."""
-        drift = random.gauss(0, 0.15)
+        """Generate a smoothly drifting simulated angle value for real-time telemetry."""
+        drift = random.gauss(0, 0.04)
         noisy = (current + drift) % 360.0
         return round(noisy, 2)
 
@@ -322,6 +331,7 @@ class SerialReader:
         Clean up a command string from UI input.
 
         - Strips leading/trailing whitespace
+        - Auto-inserts missing space for NAI channel queries (e.g. API1AVG_ANGLE? -> API1 AVG_ANGLE?)
         - Removes literal '\\r' / '\\n' escape sequences that may have
           been typed into the textbox (the terminator is added at send time)
         """
@@ -332,6 +342,12 @@ class SerialReader:
         cleaned = cleaned.replace("\\r", "").replace("\\n", "")
         # Also remove actual CR/LF if someone pasted them
         cleaned = cleaned.replace("\r", "").replace("\n", "")
+
+        # Auto-correct missing space in NAI channel commands (prevents NAI 'Space Error')
+        match_nai = re.match(r"^(API\d+)([A-Za-z_].*)$", cleaned, re.IGNORECASE)
+        if match_nai:
+            cleaned = f"{match_nai.group(1).upper()} {match_nai.group(2).upper()}"
+
         return cleaned
 
     def _log_info(self, msg: str) -> None:
@@ -355,16 +371,16 @@ class EthernetReader:
     Protocol details:
       • Connects to target IP and port (default 23 / Telnet).
       • Performs NAI authentication handshake: sends "NAII\\r\\n".
-      • Continuously queries angle commands (e.g. "API1AVG_ANGLE?\\r\\n").
+      • Continuously queries angle commands (e.g. "API1 AVG_ANGLE?\\r\\n").
       • Receives ASCII angle string (e.g. "2.427\\r\\n").
     """
 
     def __init__(
         self,
-        host: str = "192.168.1.10",
+        host: str = "192.168.1.21",
         port: int = 23,
-        command: str = "API1AVG_ANGLE?",
-        interval: float = 0.5,
+        command: str = "API1 ANGLE?",
+        interval: float = 0.03,
         on_data: Optional[Callable[[float], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
@@ -469,13 +485,18 @@ class EthernetReader:
                 if self.on_error:
                     self.on_error(f"Ethernet I/O error: {exc}")
 
-            waited = 0.0
-            while waited < self.interval and self._running.is_set():
-                time.sleep(0.05)
-                waited += 0.05
+            # Minimal sleep for real-time responsiveness without pegging CPU
+            if self.interval > 0:
+                waited = 0.0
+                step = min(0.01, self.interval)
+                while waited < self.interval and self._running.is_set():
+                    time.sleep(step)
+                    waited += step
+            else:
+                time.sleep(0.002)
 
-    def _read_response(self, timeout: float = 2.0) -> bytes:
-        """Read until newline or carriage return from socket."""
+    def _read_response(self, timeout: float = 0.8) -> bytes:
+        """Read until newline or carriage return from TCP socket with zero artificial delays."""
         if self._socket is None:
             return b""
         self._socket.settimeout(timeout)
@@ -483,22 +504,11 @@ class EthernetReader:
         buf = bytearray()
         while time.time() - start < timeout:
             try:
-                ch = self._socket.recv(1)
-                if not ch:
+                chunk = self._socket.recv(128)
+                if not chunk:
                     break
-                buf.extend(ch)
-                if ch in (b"\n", b"\r"):
-                    # Drain any trailing byte (\r or \n) immediately
-                    time.sleep(0.01)
-                    self._socket.setblocking(False)
-                    try:
-                        extra = self._socket.recv(64)
-                        if extra:
-                            buf.extend(extra)
-                    except BlockingIOError:
-                        pass
-                    finally:
-                        self._socket.setblocking(True)
+                buf.extend(chunk)
+                if b"\n" in buf or b"\r" in buf:
                     break
             except socket.timeout:
                 break
@@ -515,7 +525,7 @@ class EthernetReader:
                 cmd_clean = SerialReader._sanitise_command(self.command)
                 wire_bytes = f"{cmd_clean}\r\n".encode("ascii", errors="ignore")
                 self._socket.sendall(wire_bytes)
-                raw_bytes = self._read_response(timeout=2.0)
+                raw_bytes = self._read_response(timeout=0.8)
             except Exception as exc:
                 self._log_info(f"Socket write/read error: {exc}")
                 return None
@@ -573,19 +583,16 @@ class EthernetReader:
             buf = bytearray()
             start = time.time()
             while time.time() - start < timeout:
-                ch = s.recv(1)
-                if not ch:
+                try:
+                    chunk = s.recv(128)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    if b"\n" in buf or b"\r" in buf:
+                        break
+                except socket.timeout:
                     break
-                buf.extend(ch)
-                if ch in (b"\n", b"\r"):
-                    time.sleep(0.01)
-                    s.setblocking(False)
-                    try:
-                        extra = s.recv(64)
-                        if extra:
-                            buf.extend(extra)
-                    except BlockingIOError:
-                        pass
+                except Exception:
                     break
             return buf.decode("ascii", errors="ignore").strip() if buf else "[No reply / Timeout]"
         except Exception as exc:
