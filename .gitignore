@@ -4,4 +4,8 @@ __pycache__/
 .env
 *.log
 build/
+dist/
+test_*.xlsx
+memory.xlsx
+audit_trail.log
 
