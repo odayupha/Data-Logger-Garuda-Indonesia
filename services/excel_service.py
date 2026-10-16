@@ -38,10 +38,18 @@ from core.models import (
     SaveStatus,
     WriteMode,
 )
+from infrastructure.audit_logger import audit_log
 from infrastructure.excel_repository import ExcelRepository
 from services.evaluation_service import EvaluationService
 
 logger = logging.getLogger(__name__)
+
+
+class RestartMode:
+    SINGLE_ROW = "SINGLE_ROW"
+    ROW_TO_END = "ROW_TO_END"
+    RESUME_FROM_ROW = "RESUME_FROM_ROW"
+
 
 # Type alias for the optional GUI notification callback
 SaveCallback = Callable[[SaveResult], None]
@@ -70,6 +78,7 @@ class ExcelService:
 
         self._history: list[MeasurementRecord] = []
         self._session_stack: list[MeasurementRecord] = []  # For undo
+        self._template_cache: dict[str, dict[int, dict[str, Any]]] = {}
 
     # ── Decoupled Row & State Management ──────────────────────────────
 
@@ -565,6 +574,177 @@ class ExcelService:
         logger.info("ExcelService: cleared %d rows — next_append_row reset to %d", cleared, self._next_append_row)
         return cleared
 
+    # ── Advanced Row Operations: Clear, Delete, Range, Restart ──────────
+
+    def clear_single_row(self, row: int) -> bool:
+        """
+        Clear/blank measurement result on *row* (column G set to None).
+        Preserves physical row, test points, step numbering, and formulas.
+        """
+        if not self._active_sheet or not self._repo.is_loaded:
+            raise WorkbookNotLoadedError("No workbook loaded.")
+        if row < settings.EXCEL_START_ROW:
+            raise ValueError(f"Cannot clear header row {row}. Start row is {settings.EXCEL_START_ROW}.")
+
+        old_val = self._repo.read_cell(self._active_sheet, settings.EXCEL_RESULT_COLUMN, row)
+
+        self._repo.clear_cell(self._active_sheet, settings.EXCEL_RESULT_COLUMN, row)
+        self._repo.save_with_retry()
+
+        # Update in-memory collections
+        self._history = [h for h in self._history if h.excel_row != row]
+        self._session_stack = [s for s in self._session_stack if s.excel_row != row]
+
+        if self._selected_excel_row == row:
+            self.clear_selection()
+
+        audit_log(
+            operation="CLEAR_ROW",
+            details={
+                "sheet": self._active_sheet,
+                "row": row,
+                "old_value": old_val,
+                "action": "blanked_column_G",
+            },
+        )
+        logger.info("ExcelService: cleared row %d in %s", row, self._active_sheet)
+        return True
+
+    def delete_physical_row(self, row: int) -> bool:
+        """
+        Physically delete row in the worksheet (shifts rows below up).
+        """
+        if not self._active_sheet or not self._repo.is_loaded:
+            raise WorkbookNotLoadedError("No workbook loaded.")
+        if row < settings.EXCEL_START_ROW:
+            raise ValueError(f"Cannot delete header row {row}. Start row is {settings.EXCEL_START_ROW}.")
+
+        self._repo.delete_physical_row(self._active_sheet, row)
+        self._repo.save_with_retry()
+
+        # Invalidate template cache for this sheet
+        self._template_cache.pop(self._active_sheet, None)
+
+        # Reload history
+        self._reload_history()
+
+        audit_log(
+            operation="DELETE_ROW",
+            details={
+                "sheet": self._active_sheet,
+                "row": row,
+                "action": "physically_deleted",
+            },
+        )
+        logger.warning("ExcelService: physically deleted row %d in %s", row, self._active_sheet)
+        return True
+
+    def clear_row_range(self, start_row: int, end_row: int) -> int:
+        """
+        Clear measurement results from *start_row* to *end_row* inclusive.
+        Preserves rows < start_row (e.g. 11 to start_row - 1) and rows > end_row.
+        """
+        if not self._active_sheet or not self._repo.is_loaded:
+            raise WorkbookNotLoadedError("No workbook loaded.")
+        if start_row < settings.EXCEL_START_ROW:
+            raise ValueError(f"start_row ({start_row}) must be >= {settings.EXCEL_START_ROW} to protect headers.")
+        if start_row > end_row:
+            raise ValueError(f"start_row ({start_row}) cannot exceed end_row ({end_row}).")
+
+        cleared_count = self._repo.clear_range(
+            sheet_name=self._active_sheet,
+            column=settings.EXCEL_RESULT_COLUMN,
+            start_row=start_row,
+            end_row=end_row,
+        )
+        self._repo.save_with_retry()
+
+        # Update in-memory state: remove any history in [start_row, end_row]
+        self._history = [h for h in self._history if not (start_row <= h.excel_row <= end_row)]
+        self._session_stack = [s for s in self._session_stack if not (start_row <= s.excel_row <= end_row)]
+
+        if self._selected_excel_row and (start_row <= self._selected_excel_row <= end_row):
+            self.clear_selection()
+
+        audit_log(
+            operation="CLEAR_RANGE",
+            details={
+                "sheet": self._active_sheet,
+                "start_row": start_row,
+                "end_row": end_row,
+                "cleared_count": cleared_count,
+            },
+        )
+        logger.info(
+            "ExcelService: cleared range %d–%d (%d cells) in %s",
+            start_row, end_row, cleared_count, self._active_sheet
+        )
+        return cleared_count
+
+    def restart_measurement(
+        self,
+        start_row: int,
+        mode: str = "SINGLE_ROW",
+        end_row: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        Restart measurement from *start_row* according to the specified mode:
+          - "SINGLE_ROW" : Retake *start_row* only. No other rows cleared.
+          - "ROW_TO_END" : Clear *start_row* through *end_row* (or last populated row), set next_append_row = start_row.
+          - "RESUME_FROM_ROW" : Set next_append_row = start_row without clearing.
+        """
+        if not self._active_sheet or not self._repo.is_loaded:
+            raise WorkbookNotLoadedError("No workbook loaded.")
+        if start_row < settings.EXCEL_START_ROW:
+            raise ValueError(f"start_row ({start_row}) must be >= {settings.EXCEL_START_ROW} to protect headers.")
+
+        mode_upper = mode.upper()
+        cleared_count = 0
+
+        if mode_upper == "SINGLE_ROW":
+            # Clear target start_row so it can be retaken cleanly without touching any other rows
+            cleared_count = 1 if self.clear_single_row(start_row) else 0
+            self.next_append_row = start_row
+
+        elif mode_upper == "ROW_TO_END":
+            # Determine end row
+            last_hist = max((h.excel_row for h in self._history), default=start_row)
+            ws = self._repo.get_sheet(self._active_sheet)
+            max_ws_row = ws.max_row or start_row
+            effective_end = end_row if end_row is not None else max(last_hist, max_ws_row, start_row)
+            if effective_end >= start_row:
+                cleared_count = self.clear_row_range(start_row, effective_end)
+            self.next_append_row = start_row
+
+        elif mode_upper == "RESUME_FROM_ROW":
+            # Set target row to start_row without clearing
+            self.next_append_row = start_row
+
+        else:
+            raise ValueError(f"Unknown restart mode: {mode}. Must be SINGLE_ROW, ROW_TO_END, or RESUME_FROM_ROW.")
+
+        audit_log(
+            operation="RESTART",
+            details={
+                "sheet": self._active_sheet,
+                "start_row": start_row,
+                "mode": mode_upper,
+                "cleared_count": cleared_count,
+                "next_append_row": self.next_append_row,
+            },
+        )
+        logger.info(
+            "ExcelService: restart from row %d (mode=%s, cleared=%d, next_append_row=%d)",
+            start_row, mode_upper, cleared_count, self.next_append_row
+        )
+        return {
+            "status": "SUCCESS",
+            "start_row": start_row,
+            "mode": mode_upper,
+            "cleared_count": cleared_count,
+            "next_append_row": self.next_append_row,
+        }
+
     # ── Live Worksheet State & Evaluation ─────────────────────────────
 
     def get_live_worksheet_records(
@@ -576,6 +756,7 @@ class ExcelService:
         """
         Produce a list of live records directly representing the physical Excel worksheet.
         Combines committed cells in column G with session metadata and evaluation status.
+        Utilizes caching for static worksheet structure to maximize speed on large datasets.
         """
         if not self._active_sheet or not self._repo.is_loaded:
             return []
@@ -594,6 +775,28 @@ class ExcelService:
         max_sheet_row = max(ws.max_row or settings.EXCEL_START_ROW, settings.EXCEL_START_ROW)
         limit_row = max(last_history_row, max_sheet_row, self._next_append_row - 1)
 
+        # Template Caching: Static columns (A–F, I–K, setpoint, tolerance) cached per sheet
+        if self._active_sheet not in self._template_cache:
+            tpl_map: dict[int, dict[str, Any]] = {}
+            for r in range(settings.EXCEL_START_ROW, limit_row + 1):
+                sp_row, tol_row = eval_svc.extract_row_reference(ws, r, setpoint_col=sp_col, tolerance_col=tol_col)
+                tpl_map[r] = {
+                    "setpoint": sp_row,
+                    "tolerance": tol_row,
+                    "test_point": ws.cell(row=r, column=1).value,
+                    "input_turns": ws.cell(row=r, column=2).value,
+                    "shaft_angle": ws.cell(row=r, column=3).value,
+                    "syncro": ws.cell(row=r, column=4).value,
+                    "top_limit": ws.cell(row=r, column=5).value,
+                    "bottom_limit": ws.cell(row=r, column=6).value,
+                    "difference": ws.cell(row=r, column=9).value,
+                    "reference": ws.cell(row=r, column=10).value,
+                    "real_value": ws.cell(row=r, column=11).value,
+                }
+            self._template_cache[self._active_sheet] = tpl_map
+
+        sheet_tpl = self._template_cache[self._active_sheet]
+
         raw_rows = self._repo.read_sheet_rows(
             sheet_name=self._active_sheet,
             result_column=settings.EXCEL_RESULT_COLUMN,
@@ -608,12 +811,14 @@ class ExcelService:
             r = item["excel_row"]
             val = item["value"]
             hist_rec = history_by_row.get(r)
+            row_tpl = sheet_tpl.get(r, {})
 
             ts = hist_rec.timestamp_str if hist_rec else "--:--:--"
             save_mode_str = hist_rec.save_mode if hist_rec else ("AUTO" if val is not None else "--")
 
             # Extract row setpoint and tolerance
-            sp, tol = eval_svc.extract_row_reference(ws, r, setpoint_col=sp_col, tolerance_col=tol_col)
+            sp = row_tpl.get("setpoint")
+            tol = row_tpl.get("tolerance")
             if sp is None and target_setpoint is not None:
                 sp = target_setpoint
             if tol is None and target_tolerance is not None:
@@ -630,17 +835,6 @@ class ExcelService:
                     status=EvaluationStatus.NOT_EVALUATED,
                     reason="Row is empty / no measurement recorded",
                 )
-
-            # Extract physical worksheet cells from columns A through K
-            tp_cell = ws.cell(row=r, column=1).value
-            turns_cell = ws.cell(row=r, column=2).value
-            shaft_cell = ws.cell(row=r, column=3).value
-            syncro_cell = ws.cell(row=r, column=4).value
-            top_lim_cell = ws.cell(row=r, column=5).value
-            bot_lim_cell = ws.cell(row=r, column=6).value
-            diff_cell = ws.cell(row=r, column=9).value
-            ref_cell = ws.cell(row=r, column=10).value
-            real_val_cell = ws.cell(row=r, column=11).value
 
             # Determine direction from history record or sheet row convention
             if hist_rec and getattr(hist_rec, "direction", None):
@@ -665,16 +859,16 @@ class ExcelService:
                 "save_status": "SAVED" if val is not None else "EMPTY",
                 "reason": eval_res.reason,
                 "direction": row_dir,
-                # Physical Excel Columns A-K
-                "test_point": tp_cell,
-                "input_turns": turns_cell,
-                "shaft_angle": shaft_cell,
-                "syncro": syncro_cell,
-                "top_limit": top_lim_cell,
-                "bottom_limit": bot_lim_cell,
-                "difference": diff_cell,
-                "reference": ref_cell,
-                "real_value": real_val_cell,
+                # Physical Excel Columns A-K from cached template
+                "test_point": row_tpl.get("test_point"),
+                "input_turns": row_tpl.get("input_turns"),
+                "shaft_angle": row_tpl.get("shaft_angle"),
+                "syncro": row_tpl.get("syncro"),
+                "top_limit": row_tpl.get("top_limit"),
+                "bottom_limit": row_tpl.get("bottom_limit"),
+                "difference": row_tpl.get("difference"),
+                "reference": row_tpl.get("reference"),
+                "real_value": row_tpl.get("real_value"),
             })
 
         return records

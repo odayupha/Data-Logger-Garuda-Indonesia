@@ -203,6 +203,75 @@ class MeasurementController:
         """Erase all measurements from column G row 11+."""
         return self._excel.clear_all_data()
 
+    def clear_single_row(self, row: int) -> bool:
+        """Clear measurement data on row without shifting physical rows."""
+        self._auto_save.reset()
+        return self._excel.clear_single_row(row)
+
+    def delete_physical_row(self, row: int) -> bool:
+        """Physically delete row in the worksheet."""
+        self._auto_save.reset()
+        return self._excel.delete_physical_row(row)
+
+    def clear_row_range(self, start_row: int, end_row: int) -> int:
+        """Clear measurement data across a range of rows."""
+        self._auto_save.reset()
+        return self._excel.clear_row_range(start_row, end_row)
+
+    def restart_measurement(
+        self,
+        start_row: int,
+        mode: str = "SINGLE_ROW",
+        end_row: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        Restart measurement from start_row with selected mode:
+        SINGLE_ROW, ROW_TO_END, or RESUME_FROM_ROW.
+        """
+        self._auto_save.reset()
+        return self._excel.restart_measurement(start_row, mode, end_row)
+
+    def get_step_info_for_row(self, row: int) -> dict[str, Any]:
+        """
+        Extract decoupled step number, setpoint, tolerance, and direction for *row*.
+        """
+        if not self._repo.is_loaded or not self._excel.active_sheet:
+            return {
+                "excel_row": row,
+                "step_number": row - settings.EXCEL_START_ROW + 1,
+                "setpoint": None,
+                "tolerance": 1.50,
+                "direction": self.direction,
+            }
+
+        ws = self._repo.get_sheet(self._excel.active_sheet)
+        col_map = self._evaluation.detect_columns_in_sheet(ws)
+        sp_col = col_map.get("setpoint", "D")
+        tol_col = col_map.get("tolerance", "E")
+
+        sp, tol = self._evaluation.extract_row_reference(ws, row, setpoint_col=sp_col, tolerance_col=tol_col)
+        tp_cell = ws.cell(row=row, column=1).value
+        step_val = tp_cell if tp_cell is not None else (row - settings.EXCEL_START_ROW + 1)
+
+        sheet_name = self._excel.active_sheet or ""
+        if "CAM OUTPUT" in sheet_name.upper():
+            row_dir = "CW" if row <= 192 else "CCW"
+        elif "ACCURACY" in sheet_name.upper():
+            row_dir = "CW" if row <= 21 else "CCW"
+        else:
+            row_dir = self.direction
+
+        return {
+            "excel_row": row,
+            "step_number": step_val,
+            "test_point": str(ws.cell(row=row, column=2).value or f"TP-{step_val}"),
+            "setpoint": sp,
+            "tolerance": tol or 1.50,
+            "direction": row_dir,
+            "input_turns": ws.cell(row=row, column=3).value,
+            "shaft_angle": ws.cell(row=row, column=4).value,
+        }
+
     # ══════════════════════════════════════════════════════════════════
     #  Save Mode Control (AUTO vs MANUAL)
     # ══════════════════════════════════════════════════════════════════

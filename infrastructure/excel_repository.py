@@ -170,6 +170,51 @@ class ExcelRepository:
             self._last_op = ("WRITE", sheet_name, column, row, cell.value)
             logger.debug("write_cell: %s!%s = %s (type=%s, fmt=%s)", sheet_name, cell_ref, cell.value, type(cell.value).__name__, cell.number_format)
 
+    def clear_cell(self, sheet_name: str, column: str, row: int) -> None:
+        """Clear a single cell in column at row (sets value to None)."""
+        with self._lock:
+            self._assert_loaded()
+            ws = self._get_sheet(sheet_name)
+            cell_ref = f"{column}{row}"
+            ws[cell_ref].value = None
+            self._last_op = ("WRITE", sheet_name, column, row, None)
+            logger.debug("clear_cell: cleared %s!%s", sheet_name, cell_ref)
+
+    def clear_range(self, sheet_name: str, column: str, start_row: int, end_row: int) -> int:
+        """
+        Clear all cells in *column* from *start_row* to *end_row* inclusive.
+        Does not delete rows physically, preserving row mapping and formulas.
+        Returns count of cells cleared.
+        """
+        if start_row > end_row:
+            raise ValueError(f"start_row ({start_row}) cannot exceed end_row ({end_row})")
+
+        with self._lock:
+            self._assert_loaded()
+            ws = self._get_sheet(sheet_name)
+            cleared_count = 0
+            for r in range(start_row, end_row + 1):
+                cell = ws[f"{column}{r}"]
+                if cell.value is not None:
+                    cleared_count += 1
+                cell.value = None
+
+            self._last_op = ("CLEAR", sheet_name, start_row, end_row)
+            logger.info("clear_range: cleared %d cells in %s!%s%d:%s%d", cleared_count, sheet_name, column, start_row, column, end_row)
+            return cleared_count
+
+    def delete_physical_row(self, sheet_name: str, row: int) -> None:
+        """
+        Physically delete row in the worksheet (shifts rows below up).
+        Use with care — clear_cell is preferred for calibration workflow.
+        """
+        with self._lock:
+            self._assert_loaded()
+            ws = self._get_sheet(sheet_name)
+            ws.delete_rows(row)
+            self._last_op = None
+            logger.warning("delete_physical_row: physically deleted row %d in %s", row, sheet_name)
+
     def read_cell(self, sheet_name: str, column: str, row: int) -> Any:
         """Return the value of ``{column}{row}`` in *sheet_name*."""
         with self._lock:

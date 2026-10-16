@@ -378,13 +378,17 @@ class TelemetryGaugeCanvas(tk.Canvas):
 # ═════════════════════════════════════════════════════════════════
 #  MODAL DIALOG: Edit Record (Cockpit Styled)
 # ═════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════
+# 3. MODAL DIALOGS: EDIT, DELETE, CLEAR RANGE, RESTART
+# ═════════════════════════════════════════════════════════════════
+
 class EditRecordDialog(ctk.CTkToplevel):
     """
     Industrial modal dialog for editing an existing recorded measurement.
-    Adheres to the Cyber-Dark theme with direct numeric validation.
+    Displays engineering metadata (Test Point, Turns, Setpoint) with direct validation.
     """
 
-    def __init__(self, master, excel_row: int, current_value):
+    def __init__(self, master, excel_row: int, current_value, row_info: Optional[dict] = None):
         super().__init__(master)
         self.title(f"EDIT RECORD — ROW {excel_row}")
         self.resizable(False, False)
@@ -393,11 +397,11 @@ class EditRecordDialog(ctk.CTkToplevel):
         self.result: Optional[float] = None
         self._excel_row = excel_row
         self._original_value = current_value
+        self._row_info = row_info or {}
 
         self._build_ui()
 
-        # Center on parent window
-        dialog_w, dialog_h = 440, 360
+        dialog_w, dialog_h = 460, 410
         self.update_idletasks()
         parent_x = master.winfo_rootx()
         parent_y = master.winfo_rooty()
@@ -427,7 +431,7 @@ class EditRecordDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             header,
-            text=f"✎  EDIT RECORD — EXCEL ROW {self._excel_row}",
+            text=f"✎  KOREKSI / EDIT PENGUKURAN — BARIS {self._excel_row}",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             text_color=CLR_WARNING_AMBER,
         ).pack(side="left", padx=16)
@@ -437,12 +441,28 @@ class EditRecordDialog(ctk.CTkToplevel):
 
         # ── Body ─────────────────────────────────────────────────────
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=22, pady=16)
+        body.pack(fill="both", expand=True, padx=22, pady=12)
+
+        # Context Info Card (Test Point, Turns, Setpoint)
+        tp = self._row_info.get("test_point", "—")
+        turns = self._row_info.get("input_turns", "—")
+        sp = self._row_info.get("setpoint", "—")
+        sp_txt = f"{float(sp):.2f}°" if isinstance(sp, (int, float)) else str(sp)
+
+        info_box = ctk.CTkFrame(body, fg_color=CLR_PANEL_SEC, border_color=CLR_BORDER, border_width=1, corner_radius=6)
+        info_box.pack(fill="x", pady=(0, 10), ipady=4)
+        info_txt = f"Test Point: {tp}  |  Turns: {turns}  |  Setpoint: {sp_txt}"
+        ctk.CTkLabel(
+            info_box,
+            text=info_txt,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT_SECONDARY,
+        ).pack(fill="x", padx=8, pady=4)
 
         # Original Value
         ctk.CTkLabel(
             body,
-            text="Original Value in Excel:",
+            text="Nilai Tercatat Sebelumnya di Excel:",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=CLR_TEXT_SECONDARY,
             anchor="w",
@@ -455,8 +475,8 @@ class EditRecordDialog(ctk.CTkToplevel):
                 orig_str = str(self._original_value)
         else:
             orig_str = "—"
-        orig_box = ctk.CTkFrame(body, fg_color=CLR_INPUT_BG, border_color=CLR_BORDER, border_width=1, corner_radius=6, height=36)
-        orig_box.pack(fill="x", pady=(4, 12))
+        orig_box = ctk.CTkFrame(body, fg_color=CLR_INPUT_BG, border_color=CLR_BORDER, border_width=1, corner_radius=6, height=34)
+        orig_box.pack(fill="x", pady=(4, 10))
         orig_box.pack_propagate(False)
         ctk.CTkLabel(
             orig_box,
@@ -469,7 +489,7 @@ class EditRecordDialog(ctk.CTkToplevel):
         # New Value Entry
         ctk.CTkLabel(
             body,
-            text="Corrected Measurement (°):",
+            text="Nilai Baru yang Dikoreksi (°):",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=CLR_TEXT_PRIMARY,
             anchor="w",
@@ -477,15 +497,15 @@ class EditRecordDialog(ctk.CTkToplevel):
 
         self._entry_value = ctk.CTkEntry(
             body,
-            font=ctk.CTkFont(family="Consolas", size=16, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=15, weight="bold"),
             text_color=CLR_TEXT_PRIMARY,
             fg_color="#FFFFFF",
             border_color=CLR_BORDER,
             border_width=1,
             corner_radius=6,
-            height=40,
+            height=38,
         )
-        self._entry_value.pack(fill="x", pady=(4, 8))
+        self._entry_value.pack(fill="x", pady=(4, 6))
         if self._original_value is not None:
             try:
                 self._entry_value.insert(0, f"{float(self._original_value):.2f}")
@@ -494,14 +514,14 @@ class EditRecordDialog(ctk.CTkToplevel):
 
         # Preset Nudge Buttons
         nudge_bar = ctk.CTkFrame(body, fg_color="transparent")
-        nudge_bar.pack(fill="x", pady=(0, 8))
+        nudge_bar.pack(fill="x", pady=(0, 6))
         for delta in (-1.0, -0.1, 0.1, 1.0):
             lbl = f"{delta:+.1f}°"
             ctk.CTkButton(
                 nudge_bar,
                 text=lbl,
                 width=55,
-                height=26,
+                height=24,
                 font=ctk.CTkFont(family="Consolas", size=10),
                 fg_color="#FFFFFF",
                 border_color=CLR_BORDER,
@@ -518,15 +538,15 @@ class EditRecordDialog(ctk.CTkToplevel):
         self._lbl_err.pack(fill="x")
 
         # ── Buttons ──────────────────────────────────────────────────
-        btn_bar = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, height=54)
+        btn_bar = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, height=52)
         btn_bar.pack(fill="x", side="bottom")
         btn_bar.pack_propagate(False)
 
         ctk.CTkButton(
             btn_bar,
-            text="Cancel",
-            width=90,
-            height=34,
+            text="Batal",
+            width=85,
+            height=32,
             fg_color="#FFFFFF",
             border_color=CLR_BORDER,
             border_width=1,
@@ -537,13 +557,13 @@ class EditRecordDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(
             btn_bar,
-            text="✓ Save Changes",
-            width=130,
-            height=34,
+            text="✓ Simpan Koreksi",
+            width=135,
+            height=32,
             fg_color=CLR_ACCENT_BLUE,
             hover_color="#1D4ED8",
             text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_save,
         ).pack(side="right", padx=6, pady=10)
 
@@ -559,12 +579,12 @@ class EditRecordDialog(ctk.CTkToplevel):
     def _on_save(self):
         raw = self._entry_value.get().strip().replace("°", "").replace(",", ".")
         if not raw:
-            self._lbl_err.configure(text="Measurement value cannot be empty.")
+            self._lbl_err.configure(text="Nilai tidak boleh kosong.")
             return
         try:
             val = round(float(raw), 2)
         except ValueError:
-            self._lbl_err.configure(text="Invalid numeric format (e.g. 12.34 or 12,34).")
+            self._lbl_err.configure(text="Format angka tidak valid (contoh: 12.34 atau 12,34).")
             return
 
         self.result = val
@@ -575,6 +595,569 @@ class EditRecordDialog(ctk.CTkToplevel):
         self.result = None
         self.grab_release()
         self.destroy()
+
+
+class ClearOrDeleteRowDialog(ctk.CTkToplevel):
+    """
+    Industrial dialog to choose between:
+      1. Clear Measurement Data (blanks Column G, keeps row & step mapping).
+      2. Delete Physical Worksheet Row (physically removes row in Excel).
+    """
+
+    def __init__(self, master, excel_row: int, current_value, row_info: Optional[dict] = None):
+        super().__init__(master)
+        self.title(f"HAPUS / KOSONGKAN DATA — BARIS {excel_row}")
+        self.resizable(False, False)
+        self.configure(fg_color=CLR_PANEL_BG)
+
+        self.choice: Optional[str] = None  # "CLEAR_DATA", "DELETE_ROW", None
+        self._excel_row = excel_row
+        self._current_value = current_value
+        self._row_info = row_info or {}
+
+        self._build_ui()
+
+        dialog_w, dialog_h = 490, 370
+        self.update_idletasks()
+        parent_x = master.winfo_rootx()
+        parent_y = master.winfo_rooty()
+        parent_w = master.winfo_width()
+        parent_h = master.winfo_height()
+        x = parent_x + (parent_w - dialog_w) // 2
+        y = parent_y + (parent_h - dialog_h) // 2
+        self.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+
+        self.transient(master)
+        self.grab_set()
+        self.focus_set()
+
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, corner_radius=0, height=48)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(
+            header,
+            text=f"⌫  PILIHAN PENGELOLAAN BARIS {self._excel_row}",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=CLR_DANGER_RED,
+        ).pack(side="left", padx=16)
+
+        ctk.CTkFrame(self, fg_color=CLR_BORDER, height=1, corner_radius=0).pack(fill="x")
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=14)
+
+        tp = self._row_info.get("test_point", "—")
+        val_txt = f"{float(self._current_value):.2f}°" if isinstance(self._current_value, (int, float)) else str(self._current_value or "—")
+
+        ctk.CTkLabel(
+            body,
+            text=f"Baris terpilih: Baris {self._excel_row} (Test Point: {tp}) | Nilai saat ini: {val_txt}",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        # Option 1 Card: Clear Measurement Data (Recommended)
+        opt1_frame = ctk.CTkFrame(body, fg_color="#F0FDF4", border_color="#86EFAC", border_width=1, corner_radius=6)
+        opt1_frame.pack(fill="x", pady=(0, 10), padx=2, ipady=6)
+
+        ctk.CTkLabel(
+            opt1_frame,
+            text="OPSI 1: KOSONGKAN DATA PENGUKURAN (DIREKOMENDASIKAN)",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#15803D",
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(4, 2))
+
+        ctk.CTkLabel(
+            opt1_frame,
+            text="• Menghapus hasil ukur pada Kolom G saja.\n• Nomor baris, step pengujian, dan formula Excel lainnya tetap utuh.\n• Baris siap diisi ulang pada pengujian berikutnya.",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color="#166534",
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        ctk.CTkButton(
+            opt1_frame,
+            text="⌫ Kosongkan Nilai Baris Ini",
+            height=30,
+            fg_color="#16A34A",
+            hover_color="#15803D",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_clear_data,
+        ).pack(anchor="e", padx=12, pady=(0, 4))
+
+        # Option 2 Card: Delete Physical Row
+        opt2_frame = ctk.CTkFrame(body, fg_color="#FEF2F2", border_color="#FECACA", border_width=1, corner_radius=6)
+        opt2_frame.pack(fill="x", pady=(0, 4), padx=2, ipady=4)
+
+        ctk.CTkLabel(
+            opt2_frame,
+            text="OPSI 2: HAPUS BARIS FISIK EXCEL (DELETE ROW)",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#B91C1C",
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(4, 2))
+
+        ctk.CTkLabel(
+            opt2_frame,
+            text="• Menghapus baris secara fisik dari worksheet (baris bawahnya bergeser naik).\n• Gunakan hanya jika Anda ingin menghapus baris fisik secara permanen.",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color="#991B1B",
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", padx=12, pady=(0, 6))
+
+        ctk.CTkButton(
+            opt2_frame,
+            text="🗑 Hapus Baris Fisik",
+            height=28,
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._on_delete_row,
+        ).pack(anchor="e", padx=12, pady=(0, 4))
+
+        # ── Buttons ──────────────────────────────────────────────────
+        btn_bar = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, height=48)
+        btn_bar.pack(fill="x", side="bottom")
+        btn_bar.pack_propagate(False)
+
+        ctk.CTkButton(
+            btn_bar,
+            text="Batal",
+            width=90,
+            height=30,
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#F1F5F9",
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._on_cancel,
+        ).pack(side="right", padx=16, pady=8)
+
+    def _on_clear_data(self):
+        self.choice = "CLEAR_DATA"
+        self.grab_release()
+        self.destroy()
+
+    def _on_delete_row(self):
+        self.choice = "DELETE_ROW"
+        self.grab_release()
+        self.destroy()
+
+    def _on_cancel(self):
+        self.choice = None
+        self.grab_release()
+        self.destroy()
+
+
+class ClearRowRangeDialog(ctk.CTkToplevel):
+    """
+    Dialog to clear measurement results across an explicit row range [start_row, end_row].
+    Guarantees rows outside range (e.g. Rows 11 to start_row - 1) are untouched.
+    """
+
+    def __init__(self, master, default_start: int = 81, default_end: int = 114, max_sheet_row: int = 374):
+        super().__init__(master)
+        self.title("KOSONGKAN RENTANG BARIS (CLEAR RANGE)")
+        self.resizable(False, False)
+        self.configure(fg_color=CLR_PANEL_BG)
+
+        self.result: Optional[tuple[int, int]] = None
+        self._default_start = max(default_start, DEFAULT_START_ROW)
+        self._default_end = max(default_end, self._default_start)
+        self._max_sheet_row = max(max_sheet_row, self._default_end)
+
+        self._build_ui()
+
+        dialog_w, dialog_h = 480, 360
+        self.update_idletasks()
+        parent_x = master.winfo_rootx()
+        parent_y = master.winfo_rooty()
+        parent_w = master.winfo_width()
+        parent_h = master.winfo_height()
+        x = parent_x + (parent_w - dialog_w) // 2
+        y = parent_y + (parent_h - dialog_h) // 2
+        self.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+
+        self.transient(master)
+        self.grab_set()
+        self.focus_set()
+
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, corner_radius=0, height=48)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(
+            header,
+            text="✂  KOSONGKAN RENTANG BARIS DATA (CLEAR ROW RANGE)",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=CLR_TEXT_PRIMARY,
+        ).pack(side="left", padx=16)
+
+        ctk.CTkFrame(self, fg_color=CLR_BORDER, height=1, corner_radius=0).pack(fill="x")
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=16)
+
+        ctk.CTkLabel(
+            body,
+            text="Tentukan rentang baris Excel yang ingin dikosongkan hasil pengukurannya:",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT_SECONDARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        # Inputs Grid
+        grid_f = ctk.CTkFrame(body, fg_color="transparent")
+        grid_f.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(grid_f, text="Baris Awal (Start):", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=4)
+        self._ent_start = ctk.CTkEntry(grid_f, width=90, font=ctk.CTkFont(family="Consolas", size=13, weight="bold"), justify="center")
+        self._ent_start.insert(0, str(self._default_start))
+        self._ent_start.grid(row=0, column=1, sticky="w", pady=4)
+
+        ctk.CTkLabel(grid_f, text="Baris Akhir (End):", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold")).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
+        self._ent_end = ctk.CTkEntry(grid_f, width=90, font=ctk.CTkFont(family="Consolas", size=13, weight="bold"), justify="center")
+        self._ent_end.insert(0, str(self._default_end))
+        self._ent_end.grid(row=1, column=1, sticky="w", pady=4)
+
+        self._ent_start.bind("<KeyRelease>", lambda e: self._update_preview())
+        self._ent_end.bind("<KeyRelease>", lambda e: self._update_preview())
+
+        # Live Dynamic Preview Card
+        self._preview_card = ctk.CTkFrame(body, fg_color="#F8FAFC", border_color=CLR_BORDER, border_width=1, corner_radius=6)
+        self._preview_card.pack(fill="x", pady=(0, 8), ipady=6)
+
+        self._lbl_preview = ctk.CTkLabel(
+            self._preview_card,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=CLR_TEXT_PRIMARY,
+            justify="left",
+            anchor="w",
+        )
+        self._lbl_preview.pack(fill="x", padx=12, pady=4)
+
+        self._lbl_range_err = ctk.CTkLabel(body, text="", font=ctk.CTkFont(family="Segoe UI", size=10), text_color=CLR_DANGER_RED, anchor="w")
+        self._lbl_range_err.pack(fill="x")
+
+        self._update_preview()
+
+        # ── Buttons ──────────────────────────────────────────────────
+        btn_bar = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, height=52)
+        btn_bar.pack(fill="x", side="bottom")
+        btn_bar.pack_propagate(False)
+
+        ctk.CTkButton(
+            btn_bar,
+            text="Batal",
+            width=85,
+            height=32,
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#F1F5F9",
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._on_cancel,
+        ).pack(side="right", padx=(6, 16), pady=10)
+
+        ctk.CTkButton(
+            btn_bar,
+            text="✂ Kosongkan Rentang Ini",
+            width=170,
+            height=32,
+            fg_color=CLR_DANGER_RED,
+            hover_color="#B91C1C",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_confirm,
+        ).pack(side="right", padx=6, pady=10)
+
+    def _update_preview(self):
+        try:
+            s = int(self._ent_start.get().strip())
+            e = int(self._ent_end.get().strip())
+            if s < DEFAULT_START_ROW:
+                self._lbl_range_err.configure(text=f"Baris awal harus ≥ {DEFAULT_START_ROW} (melindungi header).")
+                self._lbl_preview.configure(text="Input baris tidak valid.")
+                return
+            if s > e:
+                self._lbl_range_err.configure(text="Baris awal tidak boleh lebih besar dari baris akhir.")
+                self._lbl_preview.configure(text="Input baris tidak valid.")
+                return
+
+            self._lbl_range_err.configure(text="")
+            count = e - s + 1
+            safe_range = f"Baris 11 s/d {s-1}" if s > DEFAULT_START_ROW else "Tidak ada data sebelumnya"
+            preview_txt = (
+                f"✦ Dampak Operasi:\n"
+                f"• Akan mengosongkan data Kolom G dari Baris {s} sampai Baris {e} (total {count} baris).\n"
+                f"• {safe_range} TETAP UTUH dan tidak akan disentuh atau diubah."
+            )
+            self._lbl_preview.configure(text=preview_txt)
+        except ValueError:
+            self._lbl_range_err.configure(text="Nomor baris harus berupa bilangan bulat positif.")
+
+    def _on_confirm(self):
+        try:
+            s = int(self._ent_start.get().strip())
+            e = int(self._ent_end.get().strip())
+            if s < DEFAULT_START_ROW or s > e:
+                return
+            self.result = (s, e)
+            self.grab_release()
+            self.destroy()
+        except ValueError:
+            pass
+
+    def _on_cancel(self):
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
+
+class RestartMeasurementDialog(ctk.CTkToplevel):
+    """
+    Dialog to restart/resume measurement from a specific row with 3 explicit modes:
+      - Mode 1: Restart Single Row
+      - Mode 2: Restart From Row to End
+      - Mode 3: Resume From Selected Row
+    """
+
+    def __init__(self, master, default_start_row: int = 81, max_populated_row: int = 114):
+        super().__init__(master)
+        self.title(f"RESTART PENGUKURAN DARI BARIS {default_start_row}")
+        self.resizable(False, False)
+        self.configure(fg_color=CLR_PANEL_BG)
+
+        self.result: Optional[dict[str, Any]] = None
+        self._default_start_row = max(default_start_row, DEFAULT_START_ROW)
+        self._max_populated_row = max(max_populated_row, self._default_start_row)
+
+        self._mode_var = ctk.StringVar(value="ROW_TO_END")
+
+        self._build_ui()
+
+        dialog_w, dialog_h = 520, 480
+        self.update_idletasks()
+        parent_x = master.winfo_rootx()
+        parent_y = master.winfo_rooty()
+        parent_w = master.winfo_width()
+        parent_h = master.winfo_height()
+        x = parent_x + (parent_w - dialog_w) // 2
+        y = parent_y + (parent_h - dialog_h) // 2
+        self.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+
+        self.transient(master)
+        self.grab_set()
+        self.focus_set()
+
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, corner_radius=0, height=48)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(
+            header,
+            text=f"⟲  RESTART PENGUKURAN DARI BARIS TERTENTU",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=CLR_ACCENT_BLUE,
+        ).pack(side="left", padx=16)
+
+        ctk.CTkFrame(self, fg_color=CLR_BORDER, height=1, corner_radius=0).pack(fill="x")
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=14)
+
+        # Target Row Input Row
+        top_bar = ctk.CTkFrame(body, fg_color="transparent")
+        top_bar.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            top_bar,
+            text="Mulai Ulang Dari Baris (Target Row):",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_TEXT_PRIMARY,
+        ).pack(side="left", padx=(0, 10))
+
+        self._ent_start = ctk.CTkEntry(
+            top_bar,
+            width=90,
+            font=ctk.CTkFont(family="Consolas", size=13, weight="bold"),
+            justify="center",
+        )
+        self._ent_start.insert(0, str(self._default_start_row))
+        self._ent_start.pack(side="left")
+        self._ent_start.bind("<KeyRelease>", lambda e: self._update_explanation())
+
+        # Mode Selection Options
+        ctk.CTkLabel(
+            body,
+            text="Pilih Metode Restart / Pengulangan:",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        # Radio button 1: ROW_TO_END
+        r1 = ctk.CTkRadioButton(
+            body,
+            text="Mode 2 — Restart From Row to End (Rekomendasi Uji Flap)",
+            variable=self._mode_var,
+            value="ROW_TO_END",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._update_explanation,
+        )
+        r1.pack(anchor="w", pady=3)
+
+        # Radio button 2: SINGLE_ROW
+        r2 = ctk.CTkRadioButton(
+            body,
+            text="Mode 1 — Restart Single Row (Hanya Ulangi Baris Ini)",
+            variable=self._mode_var,
+            value="SINGLE_ROW",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._update_explanation,
+        )
+        r2.pack(anchor="w", pady=3)
+
+        # Radio button 3: RESUME_FROM_ROW
+        r3 = ctk.CTkRadioButton(
+            body,
+            text="Mode 3 — Resume From Selected Row (Lanjutkan Tanpa Menghapus)",
+            variable=self._mode_var,
+            value="RESUME_FROM_ROW",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._update_explanation,
+        )
+        r3.pack(anchor="w", pady=3)
+
+        # Explanation Box
+        self._expl_card = ctk.CTkFrame(body, fg_color="#F8FAFC", border_color=CLR_BORDER, border_width=1, corner_radius=6)
+        self._expl_card.pack(fill="both", expand=True, pady=(10, 8), padx=2)
+
+        self._lbl_expl = ctk.CTkLabel(
+            self._expl_card,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=CLR_TEXT_PRIMARY,
+            justify="left",
+            anchor="nw",
+        )
+        self._lbl_expl.pack(fill="both", expand=True, padx=12, pady=10)
+
+        self._lbl_err = ctk.CTkLabel(body, text="", font=ctk.CTkFont(family="Segoe UI", size=10), text_color=CLR_DANGER_RED, anchor="w")
+        self._lbl_err.pack(fill="x")
+
+        self._update_explanation()
+
+        # ── Buttons ──────────────────────────────────────────────────
+        btn_bar = ctk.CTkFrame(self, fg_color=CLR_PANEL_SEC, height=52)
+        btn_bar.pack(fill="x", side="bottom")
+        btn_bar.pack_propagate(False)
+
+        ctk.CTkButton(
+            btn_bar,
+            text="Batal",
+            width=85,
+            height=32,
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#F1F5F9",
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._on_cancel,
+        ).pack(side="right", padx=(6, 16), pady=10)
+
+        ctk.CTkButton(
+            btn_bar,
+            text="⟲ Konfirmasi Restart",
+            width=150,
+            height=32,
+            fg_color=CLR_ACCENT_BLUE,
+            hover_color="#1D4ED8",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_confirm,
+        ).pack(side="right", padx=6, pady=10)
+
+    def _update_explanation(self):
+        try:
+            s = int(self._ent_start.get().strip())
+            if s < DEFAULT_START_ROW:
+                self._lbl_err.configure(text=f"Baris awal harus ≥ {DEFAULT_START_ROW}.")
+                self._lbl_expl.configure(text="Input baris tidak valid.")
+                return
+
+            self._lbl_err.configure(text="")
+            mode = self._mode_var.get()
+            safe_txt = f"Baris 11 s/d {s-1} DIJAMIN TETAP UTUH dan tidak akan disentuh." if s > DEFAULT_START_ROW else "Mulai dari awal sheet."
+
+            if mode == "ROW_TO_END":
+                txt = (
+                    f"✦ PENJELASAN MODE 2 (RESTART FROM ROW TO END):\n\n"
+                    f"1. Seluruh data hasil pengukuran dari Baris {s} hingga akhir ({self._max_populated_row}) akan dikosongkan terlebih dahulu.\n"
+                    f"2. {safe_txt}\n"
+                    f"3. Target row aktif diatur tepat ke Baris {s}.\n"
+                    f"4. Pengukuran baru dapat langsung dimulai dari Baris {s}."
+                )
+            elif mode == "SINGLE_ROW":
+                txt = (
+                    f"✦ PENJELASAN MODE 1 (RESTART SINGLE ROW):\n\n"
+                    f"1. Hanya baris {s} yang akan ditargetkan untuk diukur ulang.\n"
+                    f"2. Baris lainnya (baik sebelum {s} maupun sesudah {s}) TIDAK AKAN DIHAPUS.\n"
+                    f"3. Jika baris {s} sudah ada data, pengukuran baru akan menimpa baris {s}."
+                )
+            else:  # RESUME_FROM_ROW
+                txt = (
+                    f"✦ PENJELASAN MODE 3 (RESUME FROM SELECTED ROW):\n\n"
+                    f"1. Melanjutkan pengukuran mulai Baris {s} tanpa menghapus data secara otomatis.\n"
+                    f"2. Baris yang sudah terisi akan diperingatkan sebelum ditimpa."
+                )
+
+            self._lbl_expl.configure(text=txt)
+        except ValueError:
+            self._lbl_err.configure(text="Nomor baris harus angka bulat.")
+
+    def _on_confirm(self):
+        try:
+            s = int(self._ent_start.get().strip())
+            if s < DEFAULT_START_ROW:
+                return
+            mode = self._mode_var.get()
+            self.result = {
+                "start_row": s,
+                "mode": mode,
+                "end_row": self._max_populated_row,
+            }
+            self.grab_release()
+            self.destroy()
+        except ValueError:
+            pass
+
+    def _on_cancel(self):
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -645,6 +1228,16 @@ class FlapSensorApp(ctk.CTk):
         self._var_sheet = StringVar(value="—")
         self._var_target_row = StringVar(value=str(DEFAULT_START_ROW))
         self._var_direction = StringVar(value="CW")
+        self._var_auto_scroll = BooleanVar(value=True)
+
+        # Performance & telemetry coalescing caches
+        self._display_update_pending: bool = False
+        self._latest_telemetry_value: Optional[float] = None
+        self._cached_row: Optional[int] = None
+        self._cached_target_sp: Optional[float] = None
+        self._cached_target_tol: float = 1.50
+        self._tree_context_menu = None
+
         self._tree_live = None
         self._lbl_sync_time = None
         self._btn_manual_save = None
@@ -1668,6 +2261,19 @@ class FlapSensorApp(ctk.CTk):
         t_header_box = ctk.CTkFrame(card, fg_color="transparent")
         t_header_box.place(relx=1.0, rely=0.012, anchor="ne", x=-16, y=8)
 
+        # Auto-Scroll Toggle Checkbox
+        self._chk_auto_scroll = ctk.CTkCheckBox(
+            t_header_box,
+            text="Auto-Scroll",
+            variable=self._var_auto_scroll,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=CLR_TEXT_SECONDARY,
+            width=20,
+            checkbox_width=16,
+            checkbox_height=16,
+        )
+        self._chk_auto_scroll.pack(side="left", padx=(0, 12))
+
         lbl_sp = ctk.CTkLabel(
             t_header_box,
             text="Setpoint (°)",
@@ -1730,9 +2336,86 @@ class FlapSensorApp(ctk.CTk):
         )
         self._btn_refresh_live.pack(side="left")
 
+        # ── Row Management Quick Toolbar ──────────────────────────────
+        row_bar = ctk.CTkFrame(card, fg_color=CLR_PANEL_SEC, height=36, corner_radius=6, border_color=CLR_BORDER, border_width=1)
+        row_bar.pack(fill="x", padx=16, pady=(8, 0))
+        row_bar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            row_bar,
+            text="ROW ACTIONS:",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color=CLR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(10, 8), pady=4)
+
+        self._btn_edit_row_toolbar = ctk.CTkButton(
+            row_bar,
+            text="✎ Edit Row",
+            width=80,
+            height=26,
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#F1F5F9",
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._edit_selected_row,
+        )
+        self._btn_edit_row_toolbar.pack(side="left", padx=3, pady=4)
+
+        self._btn_clear_row_toolbar = ctk.CTkButton(
+            row_bar,
+            text="⌫ Clear Row",
+            width=85,
+            height=26,
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#F1F5F9",
+            text_color=CLR_TEXT_PRIMARY,
+            command=self._clear_selected_row,
+        )
+        self._btn_clear_row_toolbar.pack(side="left", padx=3, pady=4)
+
+        self._btn_clear_range_toolbar = ctk.CTkButton(
+            row_bar,
+            text="✂ Clear Range (81-114)",
+            width=140,
+            height=26,
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            fg_color="#FFFFFF",
+            border_color=CLR_BORDER,
+            border_width=1,
+            hover_color="#FEE2E2",
+            text_color=CLR_DANGER_RED,
+            command=self._clear_row_range_action,
+        )
+        self._btn_clear_range_toolbar.pack(side="left", padx=3, pady=4)
+
+        self._btn_restart_row_toolbar = ctk.CTkButton(
+            row_bar,
+            text="⟲ Restart From Row...",
+            width=145,
+            height=26,
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            fg_color=CLR_ACCENT_BLUE,
+            hover_color="#1D4ED8",
+            text_color="#FFFFFF",
+            command=lambda: self._restart_measurement_action(),
+        )
+        self._btn_restart_row_toolbar.pack(side="left", padx=3, pady=4)
+
+        ctk.CTkLabel(
+            row_bar,
+            text="💡 Tip: Klik kanan baris pada tabel untuk menu cepat",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=CLR_TEXT_MUTED,
+        ).pack(side="right", padx=12, pady=4)
+
         # 13-Column Live Monitoring Table
         table_container = ctk.CTkFrame(card, fg_color="transparent")
-        table_container.pack(fill="both", expand=True, padx=16, pady=(16, 14))
+        table_container.pack(fill="both", expand=True, padx=16, pady=(10, 14))
 
         live_cols = (
             "no", "row", "tp", "turns", "shaft", "setpoint", "top_limit", "bottom_limit", "measured", "result", "deviation", "real_val", "status"
@@ -1785,6 +2468,26 @@ class FlapSensorApp(ctk.CTk):
 
         self._tree_live.bind("<<TreeviewSelect>>", lambda e: self._on_live_tree_select())
         self._tree_live.bind("<Double-1>", lambda e: self._edit_selected_row())
+
+        # Right-Click Context Menu
+        self._tree_context_menu = tk.Menu(
+            self,
+            tearoff=0,
+            font=("Segoe UI", 9),
+            bg="#FFFFFF",
+            fg=CLR_TEXT_PRIMARY,
+            activebackground="#E0F2FE",
+            activeforeground=CLR_ACCENT_BLUE,
+        )
+        self._tree_context_menu.add_command(label="✎  Edit Nilai Baris Ini...", command=self._edit_selected_row)
+        self._tree_context_menu.add_command(label="⌫  Kosongkan / Hapus Baris Ini...", command=self._clear_selected_row)
+        self._tree_context_menu.add_command(label="✂  Kosongkan Rentang Baris (Clear Range)...", command=self._clear_row_range_action)
+        self._tree_context_menu.add_separator()
+        self._tree_context_menu.add_command(label="⟲  Restart Pengukuran Mulai Baris Ini...", command=lambda: self._restart_measurement_action())
+        self._tree_context_menu.add_separator()
+        self._tree_context_menu.add_command(label="🔄  Refresh Live Table", command=self._refresh_excel_live_view)
+
+        self._tree_live.bind("<Button-3>", self._show_tree_context_menu)
 
         # Compatibility tree & badges
         dummy_tree_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -1891,6 +2594,8 @@ class FlapSensorApp(ctk.CTk):
         if row < 1:
             row = 1
         self._current_row = row
+        self._cached_row = None
+        self._cached_target_sp = None
         if hasattr(self, "_ctrl") and self._ctrl.is_workbook_loaded:
             self._ctrl.current_row = row
         self._var_target_row.set(str(row))
@@ -1939,56 +2644,8 @@ class FlapSensorApp(ctk.CTk):
         threading.Thread(target=lambda: winsound.Beep(900, 120), daemon=True).start()
 
     def _restart_sampling_dialog(self):
-        """Reset recording pointer back to Row 11 and optionally clear previous sampling."""
-        if not self._ctrl.is_workbook_loaded or not self._active_sheet_name:
-            self._reset_row_to_default()
-            return
-
-        sheet_name = self._active_sheet_name
-        choice = messagebox.askyesnocancel(
-            "Restart Pengambilan Data (Row 11)",
-            f"Mulai ulang sampling dari Baris {DEFAULT_START_ROW} pada sheet '{sheet_name}'?\n\n"
-            f"• [YES]    : Kosongkan seluruh data kolom G (baris {DEFAULT_START_ROW}+) & mulai ulang bersih dari baris 11.\n"
-            f"• [NO]     : Hanya arahkan pointer target kembali ke baris 11 (tanpa menghapus data lama).\n"
-            f"• [CANCEL] : Batalkan.",
-        )
-        if choice is True:
-            try:
-                cleared_count = self._ctrl.clear_sampling_data()
-            except PermissionError:
-                messagebox.showerror(
-                    "File Terkunci",
-                    "File Excel sedang dibuka program lain.\nTutup file terlebih dahulu, lalu coba lagi."
-                )
-                self._log("✗ Gagal restart: File Excel sedang dibuka program lain.")
-                return
-            except Exception as exc:
-                messagebox.showerror("Error", f"Gagal mengosongkan data:\n{exc}")
-                return
-
-            self._history_data.clear()
-            self._record_stack.clear()
-            self._edited_rows.clear()
-            self._save_count = 0
-            self._set_active_row(DEFAULT_START_ROW, "Data dibersihkan — mulai dari 11")
-            self._badge_saved.configure(text="[ 0 SAVED ]")
-            self._refresh_history_table()
-            self._update_button_states()
-
-            if self._var_auto_save.get():
-                self._ctrl.reset_auto_save()
-
-            self._log(f"⟲ RESTART BERSIH: {cleared_count} baris data dikosongkan. Target row dimulai ulang dari baris {DEFAULT_START_ROW}.")
-            self._lbl_footer_status.configure(text=f"Restarted clean at Row {DEFAULT_START_ROW}")
-            threading.Thread(target=lambda: winsound.Beep(900, 150), daemon=True).start()
-
-        elif choice is False:
-            self._set_active_row(DEFAULT_START_ROW, "Pointer kembali ke baris 11")
-            if self._var_auto_save.get():
-                self._ctrl.reset_auto_save()
-            self._log(f"⟲ Target row diarahkan kembali ke baris {DEFAULT_START_ROW} (data existing dipertahankan).")
-            self._lbl_footer_status.configure(text=f"Target Row set to {DEFAULT_START_ROW}")
-            threading.Thread(target=lambda: winsound.Beep(900, 120), daemon=True).start()
+        """Invoke industrial Restart Measurement Dialog with 3 explicit modes."""
+        self._restart_measurement_action(start_row=self._current_row)
 
     def _scan_and_jump_next_empty(self):
         """Scan active worksheet and jump target pointer to first empty cell in column G."""
@@ -2118,9 +2775,23 @@ class FlapSensorApp(ctk.CTk):
         self._log("Instrument disconnected.")
 
     def _on_hardware_data(self, value: float):
-        """Thread-safe telemetry callback scheduled on Tk event loop."""
-        self.after(0, self._update_live_display, value)
-        self.after(0, self._ctrl.feed_angle, value, self._var_sim.get())
+        """
+        Thread-safe telemetry callback with event coalescing.
+        Directly feeds the stability engine (pure numerical calculations, non-blocking)
+        and coalesces high-frequency GUI updates onto Tkinter idle cycles to prevent UI queue flooding.
+        """
+        self._ctrl.feed_angle(value, self._var_sim.get())
+        self._latest_telemetry_value = value
+        if not self._display_update_pending:
+            self._display_update_pending = True
+            self.after_idle(self._flush_live_display)
+
+    def _flush_live_display(self):
+        """Flushes the coalesced latest telemetry value to the GUI widgets."""
+        self._display_update_pending = False
+        val = self._latest_telemetry_value
+        if val is not None:
+            self._update_live_display(val)
 
     def _on_hardware_error(self, msg: str):
         self.after(0, self._log, f"⚠ Instrument Error: {msg}")
@@ -2141,21 +2812,14 @@ class FlapSensorApp(ctk.CTk):
 
         # Compute active setpoint, tolerance, and evaluation
         target_sp = None
-        target_tol = None
+        target_tol = 1.50
         dev = None
+
+        # Check manual overrides first
         try:
             sp_raw = self._var_target_setpoint.get().strip()
             if sp_raw:
                 target_sp = float(sp_raw)
-            elif self._workbook and self._active_sheet_name:
-                ws = self._workbook[self._active_sheet_name]
-                sp_val, tol_val = self._ctrl._evaluation.extract_row_reference(
-                    ws, self._current_row, setpoint_col="D", tolerance_col="E"
-                )
-                if sp_val is not None:
-                    target_sp = float(sp_val)
-                if tol_val is not None:
-                    target_tol = float(tol_val)
         except Exception:
             pass
 
@@ -2166,8 +2830,16 @@ class FlapSensorApp(ctk.CTk):
         except Exception:
             pass
 
-        if target_tol is None:
-            target_tol = 1.50
+        # If not manually overridden, use cached setpoint and tolerance for current_row
+        if target_sp is None:
+            if self._cached_row != self._current_row or self._cached_target_sp is None:
+                step_info = self._ctrl.get_step_info_for_row(self._current_row)
+                self._cached_row = self._current_row
+                self._cached_target_sp = step_info.get("setpoint")
+                t_tol = step_info.get("tolerance")
+                self._cached_target_tol = float(t_tol) if t_tol is not None else 1.50
+            target_sp = self._cached_target_sp
+            target_tol = self._cached_target_tol
 
         curr_dir = self._var_direction.get() if hasattr(self, "_var_direction") else "CW"
         eval_res = self._ctrl.evaluate_measurement(
@@ -2392,18 +3064,7 @@ class FlapSensorApp(ctk.CTk):
             # Advance row in GUI entry
             self._set_active_row(next_row)
             self._refresh_history_table()
-            self._refresh_excel_live_view()
-
-            # Select and follow current recorded row in live table
-            if hasattr(self, "_tree_live") and self._tree_live:
-                for item_id in self._tree_live.get_children():
-                    item = self._tree_live.item(item_id)
-                    vals = item.get("values", [])
-                    if len(vals) >= 2 and str(vals[1]) == f"Row {target_row}":
-                        self._tree_live.selection_set(item_id)
-                        self._tree_live.see(item_id)
-                        break
-
+            self._update_tree_live_single_row(target_row, val, is_edited=False)
             self._update_button_states()
         elif result.status == SaveStatus.FAILED:
             play_sound_beep(450, 350, is_success=False)
@@ -2792,6 +3453,78 @@ class FlapSensorApp(ctk.CTk):
         else:
             self._update_measurement_summary()
 
+    def _show_tree_context_menu(self, event):
+        """Displays right-click context menu on the clicked table row."""
+        item_id = self._tree_live.identify_row(event.y)
+        if item_id:
+            self._tree_live.selection_set(item_id)
+            self._on_live_tree_select()
+        try:
+            self._tree_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._tree_context_menu.grab_release()
+
+    def _update_tree_live_single_row(self, row: int, measured_val: Optional[float], is_edited: bool = False):
+        """
+        In-place O(1) update for a single row in ttk.Treeview without destroying and recreating the table.
+        Significantly optimizes responsiveness and eliminates GUI stuttering during long data logging sessions.
+        """
+        if not hasattr(self, "_tree_live") or not self._tree_live:
+            return
+
+        iid = f"row_{row}"
+        if not self._tree_live.exists(iid):
+            self._refresh_excel_live_view()
+            return
+
+        curr_vals = list(self._tree_live.item(iid, "values"))
+        if len(curr_vals) < 13:
+            return
+
+        step_info = self._ctrl.get_step_info_for_row(row)
+        sp = step_info.get("setpoint")
+        tol = step_info.get("tolerance", 1.50)
+        curr_dir = self._var_direction.get() if hasattr(self, "_var_direction") else "CW"
+
+        if measured_val is not None:
+            eval_res = self._ctrl.evaluate_measurement(
+                measured_val,
+                sp,
+                tol,
+                direction=curr_dir,
+                step_number=row,
+            )
+            meas_str = f"{measured_val:.2f}°"
+            if eval_res.status == EvaluationStatus.PASS:
+                res_str = "PASS ✓"
+                status_tag = "pass"
+            elif eval_res.status == EvaluationStatus.FAIL:
+                res_str = "FAIL ✗"
+                status_tag = "fail"
+            else:
+                res_str = "NOT EVAL"
+                status_tag = "not_evaluated"
+
+            dev_str = f"{eval_res.deviation:+.2f}°" if eval_res.deviation is not None else "—"
+        else:
+            meas_str = "—"
+            res_str = "NOT EVAL"
+            dev_str = "—"
+            status_tag = "not_evaluated"
+
+        save_status = "EDITED" if is_edited else ("SAVED" if measured_val is not None else "--")
+        curr_vals[8] = meas_str
+        curr_vals[9] = res_str
+        curr_vals[10] = dev_str
+        curr_vals[12] = save_status
+
+        tags = ["latest_saved" if not is_edited else "edited", status_tag]
+        self._tree_live.item(iid, values=tuple(curr_vals), tags=tuple(tags))
+
+        if getattr(self, "_var_auto_scroll", None) and self._var_auto_scroll.get():
+            self._tree_live.see(iid)
+            self._tree_live.selection_set(iid)
+
     def _refresh_excel_live_view(self):
         """Re-read actual committed Excel worksheet rows and refresh the Live View table."""
         if not hasattr(self, "_tree_live") or self._tree_live is None:
@@ -2894,7 +3627,7 @@ class FlapSensorApp(ctk.CTk):
             self._tree_live.insert(
                 "",
                 "end",
-                iid=str(i),
+                iid=f"row_{r}",
                 values=(
                     no_str,
                     row_str,
@@ -2917,12 +3650,12 @@ class FlapSensorApp(ctk.CTk):
         if hasattr(self, "_lbl_sync_time") and self._lbl_sync_time:
             self._lbl_sync_time.configure(text=f"LAST SYNC: {now_sync} ({len(records)} ROWS)")
 
-        # Auto-scroll so active or latest saved row is centered in view
-        target_focus_row = last_saved if last_saved is not None else self._current_row
-        for i, rec in enumerate(records):
-            if rec["excel_row"] == target_focus_row:
-                self._tree_live.see(str(i))
-                break
+        # Auto-scroll so active or latest saved row is centered in view if auto-scroll is enabled
+        if getattr(self, "_var_auto_scroll", None) and self._var_auto_scroll.get():
+            target_focus_row = last_saved if last_saved is not None else self._current_row
+            focus_iid = f"row_{target_focus_row}"
+            if self._tree_live.exists(focus_iid):
+                self._tree_live.see(focus_iid)
 
     # ═════════════════════════════════════════════════════════════════
     #  ACTION: ADD RECORD (ENTER / SAVE DATA)
@@ -3057,17 +3790,7 @@ class FlapSensorApp(ctk.CTk):
 
         self._set_active_row(next_row)
         self._refresh_history_table()
-        self._refresh_excel_live_view()
-
-        # Follow recorded row in treeview
-        if hasattr(self, "_tree_live") and self._tree_live:
-            for item_id in self._tree_live.get_children():
-                item = self._tree_live.item(item_id)
-                vals = item.get("values", [])
-                if len(vals) >= 2 and str(vals[1]) == f"Row {target_row}":
-                    self._tree_live.selection_set(item_id)
-                    self._tree_live.see(item_id)
-                    break
+        self._update_tree_live_single_row(target_row, val, is_edited=False)
         self._update_button_states()
 
     def _do_save_record(self):
@@ -3124,18 +3847,24 @@ class FlapSensorApp(ctk.CTk):
     #  ACTION: EDIT SELECTED ROW
     # ═════════════════════════════════════════════════════════════════
     def _edit_selected_row(self):
+        """Action to safely edit a single measurement row with validation, audit trail, and UI sync."""
         record = self._get_selected_record()
         if not record:
-            messagebox.showinfo("Edit Row", "Pilih baris yang ingin diedit pada tabel riwayat.")
+            messagebox.showinfo("Edit Row", "Pilih baris pada tabel terlebih dahulu yang ingin diedit.")
             return
 
         if not self._ctrl.is_workbook_loaded or not self._active_sheet_name:
+            messagebox.showwarning("No Excel Loaded", "Silakan load file Excel master terlebih dahulu.")
             return
 
         target_row = record["excel_row"]
-        curr_val = record.get("value", 0.0)
+        curr_val = record.get("value")
+        step_info = self._ctrl.get_step_info_for_row(target_row)
 
-        dialog = EditRecordDialog(self, target_row, curr_val)
+        if self._var_auto_save.get():
+            self._ctrl.reset_auto_save()
+
+        dialog = EditRecordDialog(self, target_row, curr_val, row_info=step_info)
         self.wait_window(dialog)
 
         if dialog.result is None:
@@ -3145,11 +3874,12 @@ class FlapSensorApp(ctk.CTk):
         new_val = dialog.result
         updated_rec = self._ctrl.edit_record(target_row, new_val)
         if not updated_rec:
-            messagebox.showerror("Error", f"Gagal menyimpan perubahan ke Excel.")
+            messagebox.showerror("Error", f"Gagal menyimpan koreksi ke Excel.")
             self._log(f"✗ Edit row {target_row} gagal disimpan.")
             return
 
         # Update in-memory record
+        self._edited_rows.add(target_row)
         for h in self._history_data:
             if h["excel_row"] == target_row:
                 h["value"] = new_val
@@ -3160,19 +3890,200 @@ class FlapSensorApp(ctk.CTk):
                 r["value"] = new_val
                 break
 
-        self._edited_rows.add(target_row)
+        # Fast in-place UI update
+        self._update_tree_live_single_row(target_row, new_val, is_edited=True)
+        self._refresh_history_table()
+        self._update_button_states()
+
+        play_sound_beep(1600, 220, is_success=True)
+        self._log(f"✎ [EDIT ROW] Baris {target_row} berhasil dikoreksi menjadi {new_val:.2f}° (Audit logged).")
+        self._lbl_footer_status.configure(text=f"Edited row {target_row} → {new_val:.2f}°")
+
+    # ═════════════════════════════════════════════════════════════════
+    #  ACTION: CLEAR OR DELETE ROW
+    # ═════════════════════════════════════════════════════════════════
+    def _clear_selected_row(self):
+        """Action to clear measurement data or physically delete the selected row."""
+        record = self._get_selected_record()
+        if not record:
+            messagebox.showinfo("Clear / Delete Row", "Pilih baris pada tabel terlebih dahulu.")
+            return
+
+        if not self._ctrl.is_workbook_loaded or not self._active_sheet_name:
+            messagebox.showwarning("No Excel Loaded", "Silakan load file Excel master terlebih dahulu.")
+            return
+
+        target_row = record["excel_row"]
+        curr_val = record.get("value")
+        step_info = self._ctrl.get_step_info_for_row(target_row)
+
+        if self._var_auto_save.get():
+            self._ctrl.reset_auto_save()
+
+        dialog = ClearOrDeleteRowDialog(self, target_row, curr_val, row_info=step_info)
+        self.wait_window(dialog)
+
+        if not dialog.choice:
+            self._log(f"⌫ Pengelolaan baris {target_row} dibatalkan.")
+            return
+
+        if dialog.choice == "CLEAR_DATA":
+            success = self._ctrl.clear_single_row(target_row)
+            if not success:
+                messagebox.showerror("Error", f"Gagal mengosongkan data baris {target_row}.")
+                return
+
+            self._edited_rows.discard(target_row)
+            self._history_data = [h for h in self._history_data if h["excel_row"] != target_row]
+            self._record_stack = [r for r in self._record_stack if r["excel_row"] != target_row]
+            self._save_count = len(self._history_data)
+            self._badge_saved.configure(text=f"[ {self._save_count} SAVED ]")
+
+            self._update_tree_live_single_row(target_row, None, is_edited=False)
+            self._refresh_history_table()
+            self._update_button_states()
+
+            play_sound_beep(900, 150, is_success=True)
+            self._log(f"⌫ [CLEAR ROW] Data hasil ukur baris {target_row} telah dikosongkan (nomor baris & step tetap utuh).")
+            self._lbl_footer_status.configure(text=f"Cleared measurement on row {target_row}")
+
+        elif dialog.choice == "DELETE_ROW":
+            confirm = messagebox.askyesno(
+                "Konfirmasi Hapus Baris Fisik",
+                f"PERINGATAN: Menghapus baris fisik {target_row} akan menghapus seluruh data pada baris tersebut di worksheet Excel.\n"
+                f"Baris di bawahnya akan bergeser naik.\n\nApakah Anda yakin ingin melanjutkan?",
+                icon="warning"
+            )
+            if not confirm:
+                return
+
+            success = self._ctrl.delete_physical_row(target_row)
+            if not success:
+                messagebox.showerror("Error", f"Gagal menghapus baris fisik {target_row}.")
+                return
+
+            self._edited_rows.discard(target_row)
+            self._load_history_from_excel()
+            play_sound_beep(800, 200, is_success=True)
+            self._log(f"🗑 [DELETE ROW] Baris fisik {target_row} telah dihapus dari worksheet.")
+            self._lbl_footer_status.configure(text=f"Deleted physical row {target_row}")
+
+    # ═════════════════════════════════════════════════════════════════
+    #  ACTION: CLEAR ROW RANGE
+    # ═════════════════════════════════════════════════════════════════
+    def _clear_row_range_action(self):
+        """Action to clear Column G measurement data across an explicit row range."""
+        if not self._ctrl.is_workbook_loaded or not self._active_sheet_name:
+            messagebox.showwarning("No Excel Loaded", "Silakan load file Excel master terlebih dahulu.")
+            return
+
+        def_start = self._selected_excel_row if (self._selected_excel_row and self._selected_excel_row >= DEFAULT_START_ROW) else 81
+        def_end = max(114, def_start)
+
+        if self._var_auto_save.get():
+            self._ctrl.reset_auto_save()
+
+        dialog = ClearRowRangeDialog(self, default_start=def_start, default_end=def_end, max_sheet_row=374)
+        self.wait_window(dialog)
+
+        if dialog.result is None:
+            self._log("✂ Kosongkan rentang baris dibatalkan.")
+            return
+
+        s, e = dialog.result
+        confirm = messagebox.askyesno(
+            "Konfirmasi Hapus Rentang",
+            f"Kosongkan hasil pengukuran pada Kolom G dari Baris {s} sampai Baris {e}?\n\n"
+            f"• Total: {e - s + 1} baris akan dikosongkan.\n"
+            f"• Baris 11 s/d {s-1} DIJAMIN TETAP UTUH dan tidak akan berubah.\n"
+            f"• Nomor baris & step pengujian tetap konsisten.",
+            icon="warning"
+        )
+        if not confirm:
+            return
+
+        cleared_count = self._ctrl.clear_row_range(s, e)
+        # Update in-memory history
+        self._history_data = [h for h in self._history_data if not (s <= h["excel_row"] <= e)]
+        self._record_stack = [r for r in self._record_stack if not (s <= r["excel_row"] <= e)]
+        for r_num in range(s, e + 1):
+            self._edited_rows.discard(r_num)
+
+        self._save_count = len(self._history_data)
+        self._badge_saved.configure(text=f"[ {self._save_count} SAVED ]")
+
         self._refresh_history_table()
         self._refresh_excel_live_view()
-
-        for i, h in enumerate(self._history_data):
-            if h["excel_row"] == target_row:
-                self._tree.selection_set(str(i))
-                self._tree.see(str(i))
-                break
-
         self._update_button_states()
-        self._log(f"✎ Edit: row {target_row} diubah menjadi {new_val:.2f}°")
-        self._lbl_footer_status.configure(text=f"Edited row {target_row} → {new_val:.2f}°")
+
+        play_sound_beep(1000, 200, is_success=True)
+        self._log(f"✂ [CLEAR RANGE] Berhasil mengosongkan {cleared_count} baris data (Baris {s} s/d {e}). Baris 11 s/d {s-1} tetap utuh.")
+        self._lbl_footer_status.configure(text=f"Cleared Range Rows {s} - {e} ({cleared_count} rows)")
+
+    # ═════════════════════════════════════════════════════════════════
+    #  ACTION: RESTART MEASUREMENT FROM SELECTED ROW
+    # ═════════════════════════════════════════════════════════════════
+    def _restart_measurement_action(self, start_row: Optional[int] = None):
+        """
+        Primary feature: Restart/Resume measurement from any selected row with 3 explicit modes:
+          - Mode 1: Restart Single Row (retake target row only)
+          - Mode 2: Restart From Row to End (clear from target row to end, preserve rows 11 to target_row - 1)
+          - Mode 3: Resume From Selected Row (point pointer to row without clearing)
+        """
+        if not self._ctrl.is_workbook_loaded or not self._active_sheet_name:
+            messagebox.showwarning("No Excel Loaded", "Silakan load file Excel master terlebih dahulu.")
+            return
+
+        if start_row is None:
+            start_row = self._selected_excel_row or self._current_row or 81
+
+        start_row = max(start_row, DEFAULT_START_ROW)
+        max_pop = max(114, self._ctrl.scan_next_empty_row() - 1, start_row)
+
+        if self._var_auto_save.get():
+            self._ctrl.reset_auto_save()
+
+        dialog = RestartMeasurementDialog(self, default_start_row=start_row, max_populated_row=max_pop)
+        self.wait_window(dialog)
+
+        if dialog.result is None:
+            self._log(f"⟲ Restart dari baris {start_row} dibatalkan.")
+            return
+
+        res = dialog.result
+        s = res["start_row"]
+        mode = res["mode"]
+        e = res.get("end_row", max_pop)
+
+        success = self._ctrl.restart_measurement(s, mode=mode, end_row=e)
+        if not success:
+            messagebox.showerror("Error", f"Gagal melakukan restart pengukuran pada baris {s}.")
+            return
+
+        # Update in-memory history according to mode
+        if mode == "ROW_TO_END":
+            self._history_data = [h for h in self._history_data if h["excel_row"] < s]
+            self._record_stack = [r for r in self._record_stack if r["excel_row"] < s]
+            for r_num in range(s, e + 1):
+                self._edited_rows.discard(r_num)
+        elif mode == "SINGLE_ROW":
+            self._history_data = [h for h in self._history_data if h["excel_row"] != s]
+            self._record_stack = [r for r in self._record_stack if r["excel_row"] != s]
+            self._edited_rows.discard(s)
+
+        self._save_count = len(self._history_data)
+        self._badge_saved.configure(text=f"[ {self._save_count} SAVED ]")
+
+        # Set active row pointer to start_row
+        self._set_active_row(s, f"Restart Mode: {mode}")
+
+        self._refresh_history_table()
+        self._refresh_excel_live_view()
+        self._update_button_states()
+
+        play_sound_beep(1600, 250, is_success=True)
+        self._log(f"⟲ [RESTART MEASUREMENT] Berhasil! Mode: {mode}. Pointer siap di Baris {s}. Baris 11 s/d {s-1} tetap aman.")
+        self._lbl_footer_status.configure(text=f"Restarted at Row {s} (Mode: {mode})")
 
     # ═════════════════════════════════════════════════════════════════
     #  ACTION: EXPORT WORKBOOK
