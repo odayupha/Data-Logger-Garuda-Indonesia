@@ -23,26 +23,33 @@ from openpyxl import Workbook
 from config import settings
 from core.exceptions import ExcelRepositoryError, WorkbookLockedError
 from core.models import (
+    AcquisitionEvent,
     DirectionMode,
     EvaluationStatus,
     LatchState,
     MeasurementEvaluation,
     MeasurementRecord,
+    MotionState,
+    MotionTriggerResult,
     SaveMode,
     SaveResult,
     SaveStatus,
     StabilityResult,
     StabilityStatus,
     SystemState,
+    TWDAMotionStatus,
     WriteMode,
 )
 from infrastructure.excel_repository import ExcelRepository
 from services.auto_save_service import AutoSaveService
 from services.evaluation_service import EvaluationService
 from services.excel_service import ExcelService
+from services.motion_detector import MotionTrigger
 from services.stability_detector import StabilityDetector, angular_dist
+from services.twda_motion_service import TWDAMotionTrigger
 
 logger = logging.getLogger(__name__)
+
 
 
 class MeasurementController:
@@ -245,12 +252,20 @@ class MeasurementController:
             }
 
         ws = self._repo.get_sheet(self._excel.active_sheet)
-        col_map = self._evaluation.detect_columns_in_sheet(ws)
-        sp_col = col_map.get("setpoint", "D")
-        tol_col = col_map.get("tolerance", "E")
+        col_map = self._evaluation.detect_columns_in_sheet(ws) if hasattr(self._evaluation, "detect_columns_in_sheet") else {}
+        sp_col = col_map.get("setpoint", "D") if isinstance(col_map, dict) else "D"
+        tol_col = col_map.get("tolerance", "E") if isinstance(col_map, dict) else "E"
 
-        sp, tol = self._evaluation.extract_row_reference(ws, row, setpoint_col=sp_col, tolerance_col=tol_col)
-        tp_cell = ws.cell(row=row, column=1).value
+        try:
+            ref_res = self._evaluation.extract_row_reference(ws, row, setpoint_col=sp_col, tolerance_col=tol_col)
+            if isinstance(ref_res, (tuple, list)) and len(ref_res) >= 2:
+                sp, tol = ref_res[0], ref_res[1]
+            else:
+                sp, tol = None, 1.50
+        except Exception:
+            sp, tol = None, 1.50
+
+        tp_cell = ws.cell(row=row, column=1).value if hasattr(ws, "cell") else None
         step_val = tp_cell if tp_cell is not None else (row - settings.EXCEL_START_ROW + 1)
 
         sheet_name = self._excel.active_sheet or ""
@@ -340,7 +355,11 @@ class MeasurementController:
         """
         ts = time.strftime("%H:%M:%S")
         target_row_to_write = target_row or self.next_append_row
-        eff_dir = (direction or self.direction).upper()
+        row_info = self.get_step_info_for_row(target_row_to_write)
+        eff_dir = (direction or row_info.get("direction") or self.direction).upper()
+        eff_step = step_number or row_info.get("step_number")
+        eff_sp = setpoint if setpoint is not None else row_info.get("setpoint")
+        eff_tol = tolerance if tolerance is not None else row_info.get("tolerance")
 
         if angle is None:
             msg = "Gagal simpan: Tidak ada pembacaan sensor yang valid."
@@ -353,7 +372,7 @@ class MeasurementController:
                 error="No sensor data",
                 save_mode="MANUAL",
                 direction=eff_dir,
-                step_number=step_number,
+                step_number=eff_step,
             )
 
         if not self.is_workbook_loaded:
@@ -367,7 +386,7 @@ class MeasurementController:
                 error="Workbook not loaded",
                 save_mode="MANUAL",
                 direction=eff_dir,
-                step_number=step_number,
+                step_number=eff_step,
             )
 
         now = time.monotonic()
@@ -384,29 +403,32 @@ class MeasurementController:
                     error="Debounce active",
                     save_mode="MANUAL",
                     direction=eff_dir,
-                    step_number=step_number,
+                    step_number=eff_step,
                 )
 
         # 2. AUTO-SAVE ON duplicate protection:
-        # If auto-save is enabled and mode is AUTO, verify this exact position was not just saved
+        # If auto-save is enabled and mode is AUTO, verify this exact position was not just saved on the same row
         if not force and self.save_mode == SaveMode.AUTO and self._auto_save.enabled:
             if self._auto_save.latch_state == LatchState.LATCHED:
-                if self._auto_save._last_stable_angle is not None:
-                    delta = angular_dist(angle, self._auto_save._last_stable_angle)
-                    rearm_th = getattr(settings, "AUTO_SAVE_REARM_THRESHOLD_DEG", 0.18)
-                    if delta < rearm_th:
-                        msg = f"Posisi {angle:.2f}° sudah tersimpan otomatis. Duplikasi dicegah."
-                        logger.info("save_measurement (Auto ON): %s", msg)
-                        return SaveResult(
-                            status=SaveStatus.FAILED,
-                            excel_row=target_row_to_write,
-                            timestamp_str=ts,
-                            message=msg,
-                            error="Already saved",
-                            save_mode="AUTO",
-                            direction=eff_dir,
-                            step_number=step_number,
-                        )
+                last_row = getattr(self._auto_save._motion_trigger, "_last_saved_row", None)
+                # Only block if writing to the EXACT same row as already saved
+                if last_row is None or target_row_to_write == last_row:
+                    if self._auto_save._last_stable_angle is not None:
+                        delta = angular_dist(angle, self._auto_save._last_stable_angle)
+                        rearm_th = getattr(settings, "AUTO_SAVE_REARM_THRESHOLD_DEG", 0.18)
+                        if delta < rearm_th:
+                            msg = f"Posisi {angle:.2f}° pada row {target_row_to_write} sudah tersimpan otomatis. Duplikasi dicegah."
+                            logger.info("save_measurement (Auto ON): %s", msg)
+                            return SaveResult(
+                                status=SaveStatus.FAILED,
+                                excel_row=target_row_to_write,
+                                timestamp_str=ts,
+                                message=msg,
+                                error="Already saved",
+                                save_mode="AUTO",
+                                direction=eff_dir,
+                                step_number=eff_step,
+                            )
 
         try:
             res = self._excel.append_measurement(
@@ -424,10 +446,10 @@ class MeasurementController:
                 self._last_manual_save_angle = angle
                 self._last_manual_save_row = res.excel_row
 
-                # Re-latch auto-save at this angle so auto-save won't double-save
+                # Re-latch auto-save and sync motion trigger so auto-save won't double-save
                 if self._auto_save.enabled:
-                    self._auto_save._latch = LatchState.LATCHED
-                    self._auto_save._last_stable_angle = angle
+                    self._auto_save.notify_manual_save(angle, res.excel_row)
+
 
             # Structured diagnostic logging for every step
             eff_step = step_number or (res.step_number if res else None) or target_row_to_write
@@ -560,6 +582,48 @@ class MeasurementController:
     @property
     def stability_status(self) -> StabilityStatus:
         return self._auto_save.stability_status
+
+    @property
+    def motion_state(self) -> MotionState:
+        return self._auto_save.motion_state
+
+    @property
+    def motion_trigger(self) -> MotionTrigger:
+        return self._auto_save.motion_trigger
+
+    @property
+    def twda_trigger(self) -> TWDAMotionTrigger:
+        return self._auto_save.twda_trigger
+
+    def notify_controller_motion(
+        self,
+        status: TWDAMotionStatus | str,
+        target_row: Optional[int] = None,
+        step_number: Optional[int] = None,
+        direction: Optional[str] = None,
+        angle_override: Optional[float] = None,
+        monotonic_time: Optional[float] = None,
+    ) -> Optional[SaveResult]:
+        """
+        Primary acquisition trigger: Process TWDA Motion status from the Dynamix controller.
+        Detects MOVING -> STOPPED transitions and triggers acquisition transaction.
+        """
+        target_r = target_row or self.next_append_row
+        row_info = self.get_step_info_for_row(target_r)
+        eff_step = step_number or row_info.get("step_number")
+        eff_dir = direction or row_info.get("direction", self.direction)
+
+        if eff_dir != self.direction:
+            self.set_direction(eff_dir)
+
+        return self._auto_save.notify_controller_motion(
+            status=status,
+            target_row=target_r,
+            step_number=eff_step,
+            direction=eff_dir,
+            angle_override=angle_override,
+            monotonic_time=monotonic_time,
+        )
 
     def enable_auto_save(self) -> None:
         """Activate auto-save (requires workbook to be loaded)."""

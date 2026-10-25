@@ -62,17 +62,21 @@ def test_req1_autosave_on_saves_when_stable():
     ctrl.set_save_mode(SaveMode.AUTO)
     ctrl.enable_auto_save()
 
-    base_time = 1000.0
-    # Feed settling to stable at 25.0 degrees
-    for i in range(12):
-        ctrl.feed_angle(25.0)
-        time.sleep(0.01)
-
-    # Directly feed through internal auto-save service with controlled monotonic time to verify 1.0s window
     svc = ctrl._auto_save
-    svc._detector.reset()
-    svc._latch = LatchState.OPEN
+    svc.sync_save = True
+    base_time = 1000.0
 
+    # 1. Establish baseline at 20.0
+    for step in range(5):
+        svc.feed(20.0, monotonic_time=base_time + step * 0.1)
+
+    # 2. Movement to 25.0 (> 0.15 deg)
+    base_time += 1.0
+    for step in range(5):
+        svc.feed(20.0 + (step + 1) * 1.0, monotonic_time=base_time + step * 0.1)
+
+    # 3. Stop at 25.0 and confirm (>= 0.8s)
+    base_time += 1.0
     res = None
     for step in range(15):
         t = base_time + (step * 0.1)
@@ -183,7 +187,20 @@ def test_req7_resume_reinitializes_detection():
     assert not ctrl.is_auto_save_paused
 
     svc = ctrl._auto_save
+    svc.sync_save = True
     base_time = 5000.0
+
+    # 1. Establish baseline at 45.0
+    for s in range(5):
+        svc.feed(45.0, monotonic_time=base_time + s * 0.1)
+
+    # 2. Movement to 50.0
+    base_time += 1.0
+    for s in range(5):
+        svc.feed(45.0 + (s + 1) * 1.0, monotonic_time=base_time + s * 0.1)
+
+    # 3. Stop at 50.0 and confirm (>= 0.8s)
+    base_time += 1.0
     res = None
     for step in range(15):
         t = base_time + (step * 0.1)

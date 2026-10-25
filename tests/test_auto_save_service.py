@@ -57,6 +57,7 @@ def make_service(
         excel_service=mock_excel,
         stability_detector=detector,
         block_simulator_writes=block_sim,
+        sync_save=True,
     )
     svc.enable()
     return svc, mock_excel
@@ -70,12 +71,22 @@ def feed_n(
     step: float = 0.3,
     is_simulator: bool = False,
 ) -> float:
-    """Feed n samples with incrementing timestamps and return ending time."""
+    """Feed a movement cycle ending at angle with incrementing timestamps."""
     t = start_t
+    # 1. Baseline
+    for _ in range(5):
+        svc.feed(angle - 2.0, is_simulator=is_simulator, monotonic_time=t)
+        t += step
+    # 2. Movement
+    for a in [angle - 1.5, angle - 0.8, angle - 0.2]:
+        svc.feed(a, is_simulator=is_simulator, monotonic_time=t)
+        t += step
+    # 3. Stationary settling & confirmation
     for _ in range(n):
         svc.feed(angle, is_simulator=is_simulator, monotonic_time=t)
         t += step
     return t
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -146,14 +157,17 @@ class TestReArm:
         t = feed_n(svc, 25.0, n=20, start_t=0.0)
         assert mock_excel.append_measurement.call_count == 1
 
-        # Move to new position
-        for i in range(5):
-            svc.feed(30.0 + i * 0.5, monotonic_time=t)
+        # Move to new position (moves beyond rearm threshold)
+        for a in [26.0, 28.0, 30.0, 31.5]:
+            svc.feed(a, monotonic_time=t)
             t += 0.3
 
         # Second stable at 32.0
-        feed_n(svc, 32.0, n=20, start_t=t)
+        for _ in range(25):
+            svc.feed(32.0, monotonic_time=t)
+            t += 0.3
         assert mock_excel.append_measurement.call_count == 2
+
 
 
 # ══════════════════════════════════════════════════════════════════════

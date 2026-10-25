@@ -100,8 +100,14 @@ class EvaluationService:
         elif sp_float >= 350.0 and effective_angle < 50.0:
             effective_angle += 360.0
 
-        deviation = effective_angle - sp_float
+        # Calculate deviation. For circular angles, if absolute linear difference
+        # exceeds 180° (e.g. at 174°–182° boundary where sensor may report ±180° vs 0–360°),
+        # wrap using shortest circular difference to prevent false 360° error.
+        linear_diff = effective_angle - sp_float
+        circ_diff = (effective_angle - sp_float + 180.0) % 360.0 - 180.0
+        deviation = circ_diff if abs(linear_diff) > 180.0 else linear_diff
         absolute_error = abs(deviation)
+
 
         if eff_tolerance is None:
             return MeasurementEvaluation(

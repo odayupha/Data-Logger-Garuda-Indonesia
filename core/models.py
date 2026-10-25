@@ -40,7 +40,7 @@ class WriteMode(Enum):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Stability State Machine States
+#  Stability State Machine States (Legacy / Telemetry)
 # ══════════════════════════════════════════════════════════════════════
 
 class StabilityStatus(Enum):
@@ -53,8 +53,50 @@ class StabilityStatus(Enum):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Motion-Gated Stop Trigger State Machine States
+# ══════════════════════════════════════════════════════════════════════
+
+class MotionState(Enum):
+    """
+    States for the Motion-Gated Stop Trigger.
+    Inferred mechanical stop based on measured NAI API 8810A angle stream.
+    """
+    WAITING_FOR_MOTION       = "WAITING FOR MOTION"
+    MOVING                   = "MOVING — AUTO-SAVE LOCKED"
+    STOP_CANDIDATE           = "STOP CANDIDATE"
+    CAPTURE_PENDING          = "CAPTURING DATA"
+    WAITING_FOR_NEXT_MOTION  = "WAITING FOR NEXT MOTION"
+    DATA_INVALID             = "SENSOR DISCONNECTED / DATA INVALID"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  TWDA Controller Motion States & Connection Lifecycle
+# ══════════════════════════════════════════════════════════════════════
+
+class TWDAMotionStatus(Enum):
+    """
+    Status of the Dynamix controller TWDA Motion signal.
+    Primary trigger source for event-driven data acquisition.
+    """
+    STOPPED = "STOPPED"
+    MOVING  = "MOVING"
+    UNKNOWN = "UNKNOWN"
+    ERROR   = "ERROR"
+
+
+class ConnectionState(Enum):
+    """Lifecycle state of instrument / controller hardware connections."""
+    DISCONNECTED     = "DISCONNECTED"
+    CONNECTING       = "CONNECTING"
+    CONNECTED        = "CONNECTED"
+    DISCONNECTING    = "DISCONNECTING"
+    CONNECTION_ERROR = "CONNECTION ERROR"
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Stability Update Result
 # ══════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class StabilityResult:
@@ -73,6 +115,58 @@ class StabilityResult:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Motion-Gated Trigger Result
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class MotionTriggerResult:
+    """
+    Output produced by MotionTrigger on each live angle sample.
+    Provides duck-typed backward compatibility with StabilityResult.
+    """
+    motion_state: MotionState
+    trigger_capture: bool = False
+    captured_angle: Optional[float] = None
+    current_angle: Optional[float] = None
+    baseline_angle: Optional[float] = None
+    candidate_angle: Optional[float] = None
+    elapsed_in_state: float = 0.0
+    message: str = ""
+    is_valid: bool = True
+    reset_reason: Optional[str] = None
+
+    @property
+    def status(self) -> StabilityStatus:
+        if self.motion_state == MotionState.WAITING_FOR_MOTION:
+            return StabilityStatus.WAITING_FOR_DATA
+        elif self.motion_state == MotionState.MOVING:
+            return StabilityStatus.MOVING
+        elif self.motion_state == MotionState.STOP_CANDIDATE:
+            return StabilityStatus.SETTLING
+        elif self.motion_state in (MotionState.CAPTURE_PENDING, MotionState.WAITING_FOR_NEXT_MOTION):
+            return StabilityStatus.STABLE
+        elif self.motion_state == MotionState.DATA_INVALID:
+            return StabilityStatus.UNSTABLE
+        return StabilityStatus.WAITING_FOR_DATA
+
+    @property
+    def just_became_stable(self) -> bool:
+        return self.trigger_capture
+
+    @property
+    def stable_angle(self) -> Optional[float]:
+        return self.captured_angle or self.candidate_angle or self.current_angle
+
+    @property
+    def sample_count(self) -> int:
+        return 1
+
+    @property
+    def stable_duration_sec(self) -> float:
+        return self.elapsed_in_state
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Auto-Save Latch State
 # ══════════════════════════════════════════════════════════════════════
 
@@ -80,6 +174,7 @@ class LatchState(Enum):
     """State of the AutoSaveService latch."""
     OPEN     = auto()   # Ready to fire on next STABLE transition
     LATCHED  = auto()   # Already fired; waiting for movement to re-arm
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -141,8 +236,50 @@ class MeasurementEvaluation:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Measurement Record
+#  Save Operation Status
 # ══════════════════════════════════════════════════════════════════════
+
+class SaveStatus(Enum):
+    """Outcome of an attempt to persist a MeasurementRecord."""
+    SAVED    = auto()   # Successfully written and flushed to disk
+    PENDING  = auto()   # Not yet attempted (in queue)
+    RETRYING = auto()   # Failed at least once; retry in progress
+    FAILED   = auto()   # Permanently failed after max retries
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Measurement Record & Acquisition Event
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class AcquisitionEvent:
+    """
+    Complete event tracking data container for an acquisition transaction.
+    Guarantees full traceability:
+    - Unique Session ID & Monotonic Event ID
+    - Controller stop event timing & source
+    - NAI API 8810A sensor reading timing & values
+    - Validation outcome & Excel storage confirmation
+    """
+    session_id: str
+    event_id: str
+    trigger_source: str = "TWDA_MOTION"   # "TWDA_MOTION", "MANUAL", "INFERRED_MOTION"
+    step_number: Optional[int] = None
+    excel_row: Optional[int] = None
+    direction: str = "CW"
+    controller_stop_mono: float = 0.0
+    controller_stop_time: str = ""
+    sensor_read_mono: float = 0.0
+    sensor_read_time: str = ""
+    measured_angle: Optional[float] = None
+    setpoint: Optional[float] = None
+    tolerance: Optional[float] = None
+    deviation: Optional[float] = None
+    is_valid: bool = False
+    validation_status: EvaluationStatus = EvaluationStatus.NOT_EVALUATED
+    save_status: SaveStatus = SaveStatus.PENDING
+    error: Optional[str] = None
+
 
 @dataclass
 class MeasurementRecord:
@@ -166,19 +303,12 @@ class MeasurementRecord:
     evaluation_status: EvaluationStatus = EvaluationStatus.NOT_EVALUATED
     direction: str = "CW"
     step_number: Optional[int] = None
+    event: Optional[AcquisitionEvent] = None
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Save Operation Result
 # ══════════════════════════════════════════════════════════════════════
-
-class SaveStatus(Enum):
-    """Outcome of an attempt to persist a MeasurementRecord."""
-    SAVED    = auto()   # Successfully written and flushed to disk
-    PENDING  = auto()   # Not yet attempted (in queue)
-    RETRYING = auto()   # Failed at least once; retry in progress
-    FAILED   = auto()   # Permanently failed after max retries
-
 
 @dataclass
 class SaveResult:
@@ -200,6 +330,8 @@ class SaveResult:
     direction: str = "CW"           # "CW" or "CCW"
     step_number: Optional[int] = None # Sequential step or test point number
     evaluation: Optional[MeasurementEvaluation] = None
+    event: Optional[AcquisitionEvent] = None
+
 
 
 

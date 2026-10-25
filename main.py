@@ -35,13 +35,18 @@ import openpyxl
 from serial_handler import EthernetReader, SerialReader
 from controllers.measurement_controller import MeasurementController
 from core.models import (
+    AcquisitionEvent,
+    ConnectionState,
     EvaluationStatus,
     MeasurementEvaluation,
+    MotionState,
+    MotionTriggerResult,
     SaveMode,
     SaveResult,
     SaveStatus,
     StabilityResult,
     StabilityStatus,
+    TWDAMotionStatus,
 )
 from infrastructure.logging_config import configure_logging
 from infrastructure.live_excel_adapter import LiveExcelAdapter
@@ -1186,6 +1191,7 @@ class FlapSensorApp(ctk.CTk):
 
         # ── State Variables ──────────────────────────────────────────
         self._reader: Optional[EthernetReader] = None
+        self._connection_state: ConnectionState = ConnectionState.DISCONNECTED
         self._live_value: Optional[float] = None
         self._last_update_str: Optional[str] = None
         self._workbook: Optional[openpyxl.Workbook] = None
@@ -1233,10 +1239,16 @@ class FlapSensorApp(ctk.CTk):
         # Performance & telemetry coalescing caches
         self._display_update_pending: bool = False
         self._latest_telemetry_value: Optional[float] = None
+        self._last_displayed_value: Optional[float] = None  # debounce display
         self._cached_row: Optional[int] = None
         self._cached_target_sp: Optional[float] = None
         self._cached_target_tol: float = 1.50
         self._tree_context_menu = None
+
+        # Throttle: Hardware log & error callbacks ke max 1x/detik
+        self._last_hw_log_time: float = 0.0
+        self._last_hw_err_time: float = 0.0
+        self._hw_log_throttle_sec: float = 1.0
 
         self._tree_live = None
         self._lbl_sync_time = None
@@ -1444,18 +1456,32 @@ class FlapSensorApp(ctk.CTk):
 
         is_connected = (self._reader is not None and self._reader.is_connected)
         is_sim = self._var_sim.get()
+        conn_st = getattr(self, "_connection_state", ConnectionState.DISCONNECTED)
 
         if is_connected:
+            txt = "● CONNECTED (SIM)" if is_sim else "● CONNECTED"
             self._lbl_hdr_instrument.configure(
-                text="● CONNECTED",
+                text=txt,
                 text_color=CLR_SUCCESS_NEON,
                 fg_color="#DCFCE7",
             )
-        elif is_sim:
+        elif conn_st == ConnectionState.CONNECTING:
             self._lbl_hdr_instrument.configure(
-                text="● SIMULATOR",
+                text="● CONNECTING...",
                 text_color=CLR_WARNING_AMBER,
                 fg_color="#FEF3C7",
+            )
+        elif conn_st == ConnectionState.DISCONNECTING:
+            self._lbl_hdr_instrument.configure(
+                text="● DISCONNECTING...",
+                text_color=CLR_WARNING_AMBER,
+                fg_color="#FEF3C7",
+            )
+        elif conn_st == ConnectionState.CONNECTION_ERROR:
+            self._lbl_hdr_instrument.configure(
+                text="⚠ CONN ERROR",
+                text_color=CLR_DANGER_RED,
+                fg_color="#FEE2E2",
             )
         else:
             self._lbl_hdr_instrument.configure(
@@ -1478,7 +1504,7 @@ class FlapSensorApp(ctk.CTk):
             )
 
         if hasattr(self, "_badge_sys_active") and self._badge_sys_active:
-            if is_connected or is_sim:
+            if is_connected:
                 self._badge_sys_active.configure(text="● SYSTEM ACTIVE", text_color=CLR_SUCCESS_NEON)
             else:
                 self._badge_sys_active.configure(text="○ SYSTEM STANDBY", text_color=CLR_TEXT_MUTED)
@@ -1603,27 +1629,59 @@ class FlapSensorApp(ctk.CTk):
         )
         self._chk_sim.pack(side="right")
 
-        # ── Row 4: Solid Green CONNECT Button ────────────────────────
+        # ── Row 4: Action Buttons (CONNECT / DISCONNECT side by side) ──
+        btn_action_box = ctk.CTkFrame(body, fg_color="transparent")
+        btn_action_box.pack(fill="x", pady=(0, 8))
+
         self._btn_connect = ctk.CTkButton(
-            body,
+            btn_action_box,
             text="CONNECT",
             height=36,
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             fg_color=CLR_SUCCESS_NEON,
             hover_color="#15803D",
             text_color="#FFFFFF",
             corner_radius=6,
             command=self._connect_hardware,
         )
-        self._btn_connect.pack(fill="x")
+        self._btn_connect.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        # Hidden compatibility references
+        self._btn_disconnect = ctk.CTkButton(
+            btn_action_box,
+            text="■ DISCONNECT",
+            height=36,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=CLR_PANEL_SEC,
+            hover_color="#CBD5E1",
+            text_color=CLR_TEXT_MUTED,
+            border_color=CLR_BORDER,
+            border_width=1,
+            corner_radius=6,
+            state="disabled",
+            command=self._disconnect_hardware,
+        )
+        self._btn_disconnect.pack(side="right", fill="x", expand=True, padx=(4, 0))
+
+        # ── Row 5: Real-time Connection Status Indicator ──────────────
+        conn_status_box = ctk.CTkFrame(body, fg_color=CLR_PANEL_SEC, border_color=CLR_BORDER, border_width=1, corner_radius=6)
+        conn_status_box.pack(fill="x", ipady=4, pady=(0, 4))
+
+        self._conn_dot = TelemetryStatusDot(conn_status_box)
+        self._conn_dot.pack(side="left", padx=(8, 4))
+
+        self._lbl_conn_status = ctk.CTkLabel(
+            conn_status_box,
+            text="DISCONNECTED",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=CLR_DANGER_RED,
+            anchor="w",
+        )
+        self._lbl_conn_status.pack(side="left", fill="x", expand=True)
+
+        # Hidden compatibility references for direct query testing
         dummy_conn = ctk.CTkFrame(body, fg_color="transparent")
-        self._conn_dot = TelemetryStatusDot(dummy_conn)
-        self._lbl_conn_status = ctk.CTkLabel(dummy_conn, text="DISCONNECTED")
         self._entry_cmd = ctk.CTkEntry(dummy_conn, textvariable=self._var_cmd)
         self._btn_test = ctk.CTkButton(dummy_conn, text="✦ TEST", command=self._on_test_query)
-        self._btn_disconnect = ctk.CTkButton(dummy_conn, text="■ DISCONNECT", command=self._disconnect_hardware)
 
     def _on_sim_toggled(self):
         is_sim = self._var_sim.get()
@@ -1776,8 +1834,8 @@ class FlapSensorApp(ctk.CTk):
 
         self._badge_sensor_frame = ctk.CTkFrame(
             badges_row,
-            fg_color="#DCFCE7",
-            border_color="#86EFAC",
+            fg_color="#F1F5F9",
+            border_color="#CBD5E1",
             border_width=1,
             corner_radius=6,
             height=26,
@@ -1786,13 +1844,14 @@ class FlapSensorApp(ctk.CTk):
 
         self._lbl_stability_badge = ctk.CTkLabel(
             self._badge_sensor_frame,
-            text="SENSOR STABLE",
+            text="WAITING FOR MOTION",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            text_color=CLR_SUCCESS_NEON,
+            text_color=CLR_TEXT_MUTED,
             padx=10,
             pady=2,
         )
         self._lbl_stability_badge.pack()
+
 
         self._badge_direction_frame = ctk.CTkFrame(
             badges_row,
@@ -2189,12 +2248,7 @@ class FlapSensorApp(ctk.CTk):
         self._lbl_action_banner = ctk.CTkLabel(dummy, text="✦ AUTO-SAVE AKTIF")
         self._lbl_cockpit_target_row = ctk.CTkLabel(dummy, text=f"🎯 TARGET ROW [ {self._current_row} ]")
 
-        # Bind keyboard shortcuts
-        self.bind("<space>", self._on_space_pressed)
-        self.bind("<Return>", self._on_enter_pressed)
-        self.bind("<KP_Enter>", self._on_enter_pressed)
-
-        # Bind keyboard shortcuts
+        # Bind keyboard shortcuts (sekali saja — hindari duplikasi)
         self.bind("<space>", self._on_space_pressed)
         self.bind("<Return>", self._on_enter_pressed)
         self.bind("<KP_Enter>", self._on_enter_pressed)
@@ -2703,8 +2757,104 @@ class FlapSensorApp(ctk.CTk):
         cmd = choice.split("(")[0].strip()
         self._var_cmd.set(cmd)
 
+    def _set_connection_state(self, state: ConnectionState, detail_msg: str = ""):
+        """Centralized, thread-safe UI connection state manager."""
+        self._connection_state = state
+
+        if state == ConnectionState.DISCONNECTED:
+            if hasattr(self, "_btn_connect") and self._btn_connect:
+                self._btn_connect.configure(state="normal", fg_color=CLR_SUCCESS_NEON)
+            if hasattr(self, "_btn_disconnect") and self._btn_disconnect:
+                self._btn_disconnect.configure(
+                    state="disabled", fg_color=CLR_PANEL_SEC, text_color=CLR_TEXT_MUTED, border_color=CLR_BORDER
+                )
+            if hasattr(self, "_conn_dot") and self._conn_dot:
+                self._conn_dot.set_state("off")
+            if hasattr(self, "_lbl_conn_status") and self._lbl_conn_status:
+                self._lbl_conn_status.configure(text="DISCONNECTED", text_color=CLR_DANGER_RED)
+            if hasattr(self, "_lbl_footer_status") and self._lbl_footer_status:
+                self._lbl_footer_status.configure(text="Disconnected")
+            self._live_value = None
+            if hasattr(self, "_lbl_angle_readout") and self._lbl_angle_readout:
+                self._lbl_angle_readout.configure(text="--.--°")
+            if hasattr(self, "_gauge_canvas") and self._gauge_canvas:
+                self._gauge_canvas.set_value(None)
+
+        elif state == ConnectionState.CONNECTING:
+            if hasattr(self, "_btn_connect") and self._btn_connect:
+                self._btn_connect.configure(state="disabled")
+            if hasattr(self, "_btn_disconnect") and self._btn_disconnect:
+                self._btn_disconnect.configure(state="disabled")
+            if hasattr(self, "_conn_dot") and self._conn_dot:
+                self._conn_dot.set_state("connecting")
+            if hasattr(self, "_lbl_conn_status") and self._lbl_conn_status:
+                self._lbl_conn_status.configure(text="CONNECTING...", text_color=CLR_WARNING_AMBER)
+            if hasattr(self, "_lbl_footer_status") and self._lbl_footer_status:
+                self._lbl_footer_status.configure(text="Connecting to instrument...")
+
+        elif state == ConnectionState.CONNECTED:
+            if hasattr(self, "_btn_connect") and self._btn_connect:
+                self._btn_connect.configure(state="disabled")
+            if hasattr(self, "_btn_disconnect") and self._btn_disconnect:
+                self._btn_disconnect.configure(
+                    state="normal",
+                    fg_color="#FEE2E2",
+                    hover_color="#FECACA",
+                    text_color=CLR_DANGER_RED,
+                    border_color="#FCA5A5",
+                )
+            if hasattr(self, "_conn_dot") and self._conn_dot:
+                self._conn_dot.set_state("on")
+            mode_txt = f"ONLINE / {detail_msg}" if detail_msg else "ONLINE"
+            if hasattr(self, "_lbl_conn_status") and self._lbl_conn_status:
+                self._lbl_conn_status.configure(text=mode_txt, text_color=CLR_SUCCESS_NEON)
+            if hasattr(self, "_lbl_footer_status") and self._lbl_footer_status:
+                self._lbl_footer_status.configure(text=f"Connected — {detail_msg}")
+
+        elif state == ConnectionState.DISCONNECTING:
+            if hasattr(self, "_btn_connect") and self._btn_connect:
+                self._btn_connect.configure(state="disabled")
+            if hasattr(self, "_btn_disconnect") and self._btn_disconnect:
+                self._btn_disconnect.configure(state="disabled")
+            if hasattr(self, "_conn_dot") and self._conn_dot:
+                self._conn_dot.set_state("connecting")
+            if hasattr(self, "_lbl_conn_status") and self._lbl_conn_status:
+                self._lbl_conn_status.configure(text="DISCONNECTING...", text_color=CLR_WARNING_AMBER)
+            if hasattr(self, "_lbl_footer_status") and self._lbl_footer_status:
+                self._lbl_footer_status.configure(text="Disconnecting instrument...")
+
+        elif state == ConnectionState.CONNECTION_ERROR:
+            if hasattr(self, "_btn_connect") and self._btn_connect:
+                self._btn_connect.configure(state="normal", fg_color=CLR_SUCCESS_NEON)
+            if hasattr(self, "_btn_disconnect") and self._btn_disconnect:
+                self._btn_disconnect.configure(
+                    state="disabled", fg_color=CLR_PANEL_SEC, text_color=CLR_TEXT_MUTED, border_color=CLR_BORDER
+                )
+            if hasattr(self, "_conn_dot") and self._conn_dot:
+                self._conn_dot.set_state("off")
+            err_txt = f"ERROR: {detail_msg}" if detail_msg else "CONNECTION ERROR"
+            if hasattr(self, "_lbl_conn_status") and self._lbl_conn_status:
+                self._lbl_conn_status.configure(text=err_txt[:26], text_color=CLR_DANGER_RED)
+            if hasattr(self, "_lbl_footer_status") and self._lbl_footer_status:
+                self._lbl_footer_status.configure(text=f"Connection Error: {detail_msg}")
+            self._live_value = None
+            if hasattr(self, "_lbl_angle_readout") and self._lbl_angle_readout:
+                self._lbl_angle_readout.configure(text="--.--°")
+            if hasattr(self, "_gauge_canvas") and self._gauge_canvas:
+                self._gauge_canvas.set_value(None)
+
+        self._update_header_status()
+        self._update_measurement_summary()
+
     def _connect_hardware(self):
-        """Initiate Ethernet connection to NAI 8810A."""
+        """Initiate asynchronous Ethernet connection to NAI 8810A."""
+        if getattr(self, "_connection_state", None) in (
+            ConnectionState.CONNECTING,
+            ConnectionState.CONNECTED,
+            ConnectionState.DISCONNECTING,
+        ):
+            return
+
         ip = self._var_ip.get().strip()
         try:
             port = int(self._var_port.get().strip())
@@ -2718,60 +2868,76 @@ class FlapSensorApp(ctk.CTk):
             messagebox.showwarning("Missing IP", "Masukkan IP Address NAI 8810A terlebih dahulu.")
             return
 
-        self._conn_dot.set_state("connecting")
-        self._lbl_conn_status.configure(text="CONNECTING...", text_color=CLR_WARNING_AMBER)
-        self.update_idletasks()
+        self._set_connection_state(ConnectionState.CONNECTING)
+        target_desc = "SIMULATOR" if sim else f"ETHERNET {ip}:{port}"
+        self._log(f"Menghubungkan ke {target_desc}...")
 
-        self._reader = EthernetReader(
-            host=ip,
-            port=port,
-            command=cmd,
-            interval=POLL_INTERVAL_MS / 1000.0,
-            on_data=self._on_hardware_data,
-            on_error=self._on_hardware_error,
-            on_log=self._on_hardware_log,
-            simulator=sim,
-        )
-        self._reader.connect()
+        def connect_worker():
+            reader = EthernetReader(
+                host=ip,
+                port=port,
+                command=cmd,
+                interval=POLL_INTERVAL_MS / 1000.0,
+                on_data=self._on_hardware_data,
+                on_error=self._on_hardware_error,
+                on_log=self._on_hardware_log,
+                simulator=sim,
+            )
+            success = reader.connect()
+            if success:
+                self.after(0, lambda: self._on_connect_success(reader, sim, ip, port))
+            else:
+                self.after(0, lambda: self._on_connect_failed("Gagal terhubung ke instrumen."))
 
-        # Update controls
-        self._btn_connect.configure(state="disabled")
-        self._btn_disconnect.configure(state="normal")
-        self._conn_dot.set_state("on")
+        threading.Thread(target=connect_worker, daemon=True).start()
 
-        mode_str = "SIMULATOR" if sim else f"ETHERNET {ip}:{port}"
-        self._lbl_conn_status.configure(text=f"ONLINE / {mode_str}", text_color=CLR_SUCCESS_NEON)
-        self._lbl_footer_status.configure(text=f"Connected — {mode_str}")
+    def _on_connect_success(self, reader: EthernetReader, sim: bool, ip: str, port: int):
+        if getattr(self, "_connection_state", None) != ConnectionState.CONNECTING:
+            reader.disconnect()
+            return
+
+        self._reader = reader
+        mode_str = "SIMULATOR" if sim else f"{ip}:{port}"
+        self._set_connection_state(ConnectionState.CONNECTED, mode_str)
         self._log(f"Connected: {mode_str}")
 
-        # Automatically engage auto-save if workbook is loaded and auto-save is enabled
         if hasattr(self, "_ctrl") and self._ctrl.is_workbook_loaded and self._var_auto_save.get():
             self._ctrl.enable_auto_save()
-            self._log("✦ Auto-Save AKTIF: Sensor stabil akan otomatis dicatat ke Excel.")
+            self._log("✦ Auto-Save AKTIF: Sensor stabil / Motion controller akan otomatis dicatat ke Excel.")
 
-        self._update_header_status()
-        self._update_measurement_summary()
+    def _on_connect_failed(self, err_msg: str):
+        self._reader = None
+        self._set_connection_state(ConnectionState.CONNECTION_ERROR, err_msg)
+        self._log(f"✗ Gagal membuka koneksi: {err_msg}")
+        messagebox.showerror("Koneksi Gagal", f"Tidak dapat terhubung ke instrumen:\n{err_msg}")
 
     def _disconnect_hardware(self):
-        """Terminate connection and clean up socket/thread."""
-        if hasattr(self, "_ctrl"):
-            self._ctrl.reset_auto_save()
-        if self._reader:
-            self._reader.disconnect()
+        """Terminate connection asynchronously and clean up socket/thread."""
+        if getattr(self, "_connection_state", None) in (
+            ConnectionState.DISCONNECTED,
+            ConnectionState.DISCONNECTING,
+        ):
+            return
+
+        self._set_connection_state(ConnectionState.DISCONNECTING)
+        self._log("Memutuskan koneksi instrumen...")
+
+        def disconnect_worker():
+            if hasattr(self, "_ctrl"):
+                self._ctrl.reset_auto_save()
+            old_reader = self._reader
             self._reader = None
+            if old_reader:
+                try:
+                    old_reader.disconnect()
+                except Exception:
+                    pass
+            self.after(0, self._on_disconnect_complete)
 
-        self._btn_connect.configure(state="normal")
-        self._btn_disconnect.configure(state="disabled")
-        self._conn_dot.set_state("off")
-        self._lbl_conn_status.configure(text="DISCONNECTED", text_color=CLR_DANGER_RED)
-        self._lbl_footer_status.configure(text="Disconnected")
+        threading.Thread(target=disconnect_worker, daemon=True).start()
 
-        self._live_value = None
-        if hasattr(self, "_lbl_angle_readout") and self._lbl_angle_readout:
-            self._lbl_angle_readout.configure(text="--.--°")
-        self._gauge_canvas.set_value(None)
-        self._update_header_status()
-        self._update_measurement_summary()
+    def _on_disconnect_complete(self):
+        self._set_connection_state(ConnectionState.DISCONNECTED)
         self._log("Instrument disconnected.")
 
     def _on_hardware_data(self, value: float):
@@ -2787,17 +2953,43 @@ class FlapSensorApp(ctk.CTk):
             self.after_idle(self._flush_live_display)
 
     def _flush_live_display(self):
-        """Flushes the coalesced latest telemetry value to the GUI widgets."""
+        """Flushes the coalesced latest telemetry value to the GUI widgets.
+        Skips full render if value has not changed significantly (debounce 0.01°).
+        """
         self._display_update_pending = False
         val = self._latest_telemetry_value
-        if val is not None:
-            self._update_live_display(val)
+        if val is None:
+            return
+        # Debounce: skip jika perubahan < 0.01° untuk mengurangi beban render
+        prev = self._last_displayed_value
+        if prev is not None and abs(val - prev) < 0.01:
+            return
+        self._last_displayed_value = val
+        self._update_live_display(val)
 
     def _on_hardware_error(self, msg: str):
-        self.after(0, self._log, f"⚠ Instrument Error: {msg}")
+        """Throttled error callback — max 1 error log per detik agar tidak spam GUI."""
+        now = time.monotonic()
+        if now - self._last_hw_err_time >= self._hw_log_throttle_sec:
+            self._last_hw_err_time = now
+            self.after(0, self._log, f"⚠ Instrument Error: {msg}")
+
+        # Detect disconnection if reader reports error and is no longer connected
+        if (
+            self._reader is not None
+            and not self._reader.is_connected
+            and getattr(self, "_connection_state", None) == ConnectionState.CONNECTED
+        ):
+            self.after(0, lambda: self._set_connection_state(ConnectionState.CONNECTION_ERROR, "Terputus"))
 
     def _on_hardware_log(self, msg: str):
-        self.after(0, self._log, f"✦ {msg}")
+        """Throttled log callback — max 1 hardware log per detik agar tidak flood GUI queue.
+        Tanpa throttle ini, polling 30ms menghasilkan 33+ after() calls/detik ke Text widget.
+        """
+        now = time.monotonic()
+        if now - self._last_hw_log_time >= self._hw_log_throttle_sec:
+            self._last_hw_log_time = now
+            self.after(0, self._log, f"✦ {msg}")
 
     def _update_live_display(self, value: float):
         """Refresh gauge and last update timestamp with zero delay."""
@@ -3070,12 +3262,16 @@ class FlapSensorApp(ctk.CTk):
             play_sound_beep(450, 350, is_success=False)
             self._log(f"✗ [AUTO-SAVE GAGAL] {result.error}")
             self._lbl_footer_status.configure(text=f"Auto-Save Gagal: {result.error}")
+            if hasattr(self, "_lbl_stability_badge") and self._lbl_stability_badge:
+                self._lbl_stability_badge.configure(text="SAVE FAILED", text_color=CLR_DANGER_RED)
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#FEE2E2", border_color="#FCA5A5")
 
-    def _on_stability_update(self, result: StabilityResult):
-        """Dispatched from MeasurementController on stability changes."""
+    def _on_stability_update(self, result: StabilityResult | MotionTriggerResult):
+        """Dispatched from MeasurementController on stability/motion changes."""
         self.after(0, self._apply_stability_update, result)
 
-    def _apply_stability_update(self, result: StabilityResult):
+    def _apply_stability_update(self, result: StabilityResult | MotionTriggerResult):
         if not hasattr(self, "_lbl_stability_badge"):
             return
         if getattr(self._ctrl, "is_auto_save_paused", False):
@@ -3086,10 +3282,86 @@ class FlapSensorApp(ctk.CTk):
 
         is_auto_mode = (getattr(self._ctrl, "save_mode", SaveMode.AUTO) == SaveMode.AUTO)
         prev = getattr(self, "_last_stability_status", None)
-        curr = result.status
+
+        # Check for MotionState first, then fallback to StabilityStatus
+        m_state = getattr(result, "motion_state", None)
+        curr = m_state if m_state is not None else result.status
         self._last_stability_status = curr
 
-        if curr == StabilityStatus.STABLE:
+        if curr in (MotionState.WAITING_FOR_MOTION, StabilityStatus.WAITING_FOR_DATA):
+            self._lbl_stability_badge.configure(
+                text="WAITING FOR MOTION",
+                text_color=CLR_TEXT_MUTED,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#F1F5F9", border_color="#CBD5E1")
+            if prev != curr:
+                self._log("● [AUTO-SAVE] Menunggu pergerakan shaft NAI API 8810A (Auto-Save terkunci)...")
+                self._lbl_footer_status.configure(text="Waiting for motion (estimated from API 8810A stream)")
+
+        elif curr == MotionState.MOVING or curr == StabilityStatus.MOVING:
+            self._lbl_stability_badge.configure(
+                text="MOVING — AUTO-SAVE LOCKED",
+                text_color=CLR_ACCENT_BLUE,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#E0F2FE", border_color="#BAE6FD")
+            if prev != curr:
+                tag = "[AUTO-SAVE]" if is_auto_mode else "[MANUAL MODE]"
+                self._log(f"⇄ {tag} Pergerakan shaft terdeteksi dari sudut API 8810A (Auto-Save terkunci).")
+                self._lbl_footer_status.configure(text="Moving — Auto-Save locked (estimated from API 8810A stream)")
+
+        elif curr in (MotionState.STOP_CANDIDATE, StabilityStatus.SETTLING):
+            self._lbl_stability_badge.configure(
+                text="STOP CANDIDATE",
+                text_color=CLR_WARNING_AMBER,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#FEF3C7", border_color="#FDE68A")
+            if prev != curr:
+                live_str = f"~{self._live_value:.2f}°" if self._live_value is not None else ""
+                tag = "[AUTO-SAVE]" if is_auto_mode else "[MOTION]"
+                self._log(f"◌ {tag} Pergerakan terhenti pada {live_str}. Konfirmasi stop berlangsung...")
+                self._lbl_footer_status.configure(text="Stop candidate — confirming mechanical stop (estimated from API 8810A)")
+
+        elif curr == MotionState.CAPTURE_PENDING:
+            self._lbl_stability_badge.configure(
+                text="CAPTURING DATA",
+                text_color=CLR_SUCCESS_NEON,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#DCFCE7", border_color="#86EFAC")
+            if prev != curr:
+                ang_val = getattr(result, "captured_angle", self._live_value)
+                ang_str = f"{ang_val:.2f}°" if ang_val is not None else ""
+                self._log(f"● [CAPTURE] Inferred stop terkonfirmasi pada {ang_str}. Menyimpan ke Excel...")
+                self._lbl_footer_status.configure(text=f"Capturing data at {ang_str} (inferred stop from API 8810A)")
+
+        elif curr == MotionState.WAITING_FOR_NEXT_MOTION:
+            row_num = self._last_saved_row or (self._current_row - 1 if self._current_row > 11 else 11)
+            self._lbl_stability_badge.configure(
+                text=f"SAVED — ROW {row_num}",
+                text_color=CLR_SUCCESS_NEON,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#DCFCE7", border_color="#86EFAC")
+            if prev != curr:
+                self._log(f"✓ [AUTO-SAVE] Row {row_num} tersimpan. Menunggu pergerakan berikutnya...")
+                self._lbl_footer_status.configure(text=f"Saved Row {row_num}. Waiting for next motion cycle.")
+
+        elif curr in (MotionState.DATA_INVALID, StabilityStatus.UNSTABLE):
+            self._lbl_stability_badge.configure(
+                text="SENSOR DISCONNECTED / DATA INVALID",
+                text_color=CLR_DANGER_RED,
+            )
+            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
+                self._badge_sensor_frame.configure(fg_color="#FEE2E2", border_color="#FCA5A5")
+            if prev != curr:
+                diag = getattr(result, "reset_reason", None) or "Pembacaan tidak valid atau timeout"
+                self._log(f"⚠ [SENSOR] {diag}")
+                self._lbl_footer_status.configure(text=f"Sensor invalid / disconnected: {diag}")
+
+        elif curr == StabilityStatus.STABLE:
             badge_text = "SENSOR STABLE"
             self._lbl_stability_badge.configure(
                 text=badge_text,
@@ -3103,38 +3375,6 @@ class FlapSensorApp(ctk.CTk):
                     self._log(f"● [AUTO-SAVE] Sensor STABIL terkonfirmasi pada {angle_str}. Menyimpan otomatis...")
                 else:
                     self._log(f"● [MANUAL MODE] Sensor STABIL pada {angle_str}. Tekan ENTER atau klik SAVE DATA untuk mencatat.")
-        elif curr == StabilityStatus.SETTLING:
-            self._lbl_stability_badge.configure(
-                text="SETTLING...",
-                text_color=CLR_WARNING_AMBER,
-            )
-            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
-                self._badge_sensor_frame.configure(fg_color="#FEF3C7", border_color="#FDE68A")
-            if prev != StabilityStatus.SETTLING and prev != StabilityStatus.STABLE:
-                live_str = f"~{self._live_value:.2f}°" if self._live_value is not None else ""
-                tag = "[AUTO-SAVE]" if is_auto_mode else "[STABILITY]"
-                self._log(f"◌ {tag} Sensor mulai diam pada {live_str} (menunggu stabil 1.0s)...")
-        elif curr == StabilityStatus.MOVING:
-            self._lbl_stability_badge.configure(
-                text="MOVING",
-                text_color=CLR_ACCENT_BLUE,
-            )
-            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
-                self._badge_sensor_frame.configure(fg_color="#E0F2FE", border_color="#BAE6FD")
-            if prev == StabilityStatus.STABLE:
-                tag = "[AUTO-SAVE]" if is_auto_mode else "[STABILITY]"
-                self._log(f"⇄ {tag} Sensor digerakkan ke posisi baru.")
-        elif curr == StabilityStatus.UNSTABLE:
-            self._lbl_stability_badge.configure(
-                text="UNSTABLE",
-                text_color=CLR_DANGER_RED,
-            )
-            if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
-                self._badge_sensor_frame.configure(fg_color="#FEE2E2", border_color="#FCA5A5")
-            if prev != StabilityStatus.UNSTABLE:
-                diag = result.reset_reason or "fluktuasi berkelanjutan"
-                tag = "[AUTO-SAVE]" if is_auto_mode else "[STABILITY]"
-                self._log(f"⚠ {tag} Diagnostik: sensor UNSTABLE ({diag})")
         else:
             self._lbl_stability_badge.configure(
                 text="READY",
@@ -3142,6 +3382,7 @@ class FlapSensorApp(ctk.CTk):
             )
             if hasattr(self, "_badge_sensor_frame") and self._badge_sensor_frame:
                 self._badge_sensor_frame.configure(fg_color="#F1F5F9", border_color="#E2E8F0")
+
 
     def _on_test_query(self):
         """Safely test sending active command over socket or simulator."""
@@ -4152,8 +4393,12 @@ class FlapSensorApp(ctk.CTk):
         """Clean shutdown protocol."""
         if hasattr(self, "_ctrl"):
             self._ctrl.disable_auto_save()
-        if self._reader and self._reader.is_connected:
-            self._reader.disconnect()
+        if self._reader:
+            try:
+                self._reader.disconnect()
+            except Exception:
+                pass
+            self._reader = None
         self.destroy()
 
 

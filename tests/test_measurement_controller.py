@@ -94,12 +94,27 @@ class TestMeasurementControllerAutoSave:
         ctrl, wb, ws, auto_saves, stabilities, errors = create_in_memory_controller()
         ctrl.enable_auto_save()
 
-        # Feed stable angles
-        for i in range(25):
-            ctrl._auto_save.feed(18.5, monotonic_time=i * 0.3)
+        # 1. Baseline
+        t = 0.0
+        for _ in range(5):
+            ctrl._auto_save.feed(10.0, monotonic_time=t)
+            t += 0.1
+
+        # 2. Movement to 18.5
+        for a in [11.0, 14.0, 17.0]:
+            ctrl._auto_save.feed(a, monotonic_time=t)
+            t += 0.1
+
+        # 3. Stop confirmed at 18.5
+        for _ in range(25):
+            ctrl._auto_save.feed(18.5, monotonic_time=t)
+            t += 0.1
+
+        ctrl._auto_save.wait_for_save()
 
         assert len(stabilities) > 0
         assert len(auto_saves) == 1
         assert auto_saves[0].status == SaveStatus.SAVED
         assert auto_saves[0].excel_row == 11
         assert ws["G11"].value == 18.5
+

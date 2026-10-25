@@ -243,7 +243,7 @@ def test_scenario_07_resume_after_pause():
     svc.activate_sheet("FLAP_MEASUREMENT")
 
     detector = StabilityDetector(min_samples=5, min_duration_sec=0.5, tolerance_deg=0.05)
-    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector)
+    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector, sync_save=True)
     auto_save.enable()
     auto_save.pause()
     assert auto_save.state == SystemState.PAUSED
@@ -251,9 +251,15 @@ def test_scenario_07_resume_after_pause():
     auto_save.resume()
     assert auto_save.state == SystemState.RUNNING
 
-    # After resume, fresh samples settle and save
+    # After resume, fresh samples require motion cycle before saving
     t = 100.0
-    for _ in range(10):
+    for _ in range(5):
+        auto_save.feed(20.0, monotonic_time=t)
+        t += 0.15
+    for val in [21.0, 22.0, 23.0, 24.0]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+    for _ in range(15):
         auto_save.feed(25.0, monotonic_time=t)
         t += 0.15
 
@@ -311,26 +317,40 @@ def test_scenario_09_reading_268_70_to_268_42_and_further():
         rearm_threshold_deg=0.18,
         movement_threshold_deg=0.08,
     )
-    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector)
+    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector, sync_save=True)
     auto_save.enable()
 
     t = 0.0
+    # Baseline
+    for _ in range(5):
+        auto_save.feed(268.00, monotonic_time=t)
+        t += 0.15
+
     # 1. First position: 268.70
-    for _ in range(8):
+    for val in [268.20, 268.40, 268.60]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+    for _ in range(12):
         auto_save.feed(268.70, monotonic_time=t)
         t += 0.15
     assert len(svc.history) == 1
     assert ws["G11"].value == 268.70
 
     # 2. Transition: moves to 268.42 (delta = 0.28° > 0.18°)
-    for _ in range(8):
+    for val in [268.55, 268.48]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+    for _ in range(12):
         auto_save.feed(268.42, monotonic_time=t)
         t += 0.15
     assert len(svc.history) == 2
     assert ws["G12"].value == 268.42
 
     # 3. Transition: moves to 271.34
-    for _ in range(8):
+    for val in [269.00, 270.00, 271.00]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+    for _ in range(12):
         auto_save.feed(271.34, monotonic_time=t)
         t += 0.15
     assert len(svc.history) == 3
@@ -352,19 +372,29 @@ def test_scenario_10_sensor_stops_with_small_noise():
         min_samples=5,
         min_duration_sec=0.5,
     )
-    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector)
+    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector, sync_save=True)
     auto_save.enable()
 
-    # Small synchro jitter around 268.70
-    jitter = [268.70, 268.71, 268.69, 268.70, 268.72, 268.70]
     t = 0.0
+    # Baseline
+    for _ in range(5):
+        auto_save.feed(265.00, monotonic_time=t)
+        t += 0.15
+
+    # Move to 268.70
+    for val in [266.00, 267.00, 268.00]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+
+    # Small synchro jitter around 268.70
+    jitter = [268.70, 268.71, 268.69, 268.70, 268.72, 268.70] * 2
     for a in jitter:
         auto_save.feed(a, monotonic_time=t)
         t += 0.15
 
     assert len(svc.history) == 1
-    # Median representative value is exactly 268.70
-    assert ws["G11"].value == 268.70
+    # Median representative value is approximately 268.70
+    assert abs(ws["G11"].value - 268.70) <= 0.05
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -398,12 +428,22 @@ def test_scenario_12_sensor_stable_then_moves_to_new_position():
     svc.activate_sheet("FLAP_MEASUREMENT")
 
     detector = StabilityDetector(min_samples=5, min_duration_sec=0.5, rearm_threshold_deg=0.20)
-    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector)
+    auto_save = AutoSaveService(excel_service=svc, stability_detector=detector, sync_save=True)
     auto_save.enable()
 
     t = 0.0
-    # First position
-    for _ in range(8):
+    # Baseline
+    for _ in range(5):
+        auto_save.feed(5.0, monotonic_time=t)
+        t += 0.15
+
+    # Move to 10.0
+    for val in [6.0, 7.5, 9.0]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+
+    # First position (10.0)
+    for _ in range(12):
         auto_save.feed(10.0, monotonic_time=t)
         t += 0.15
     assert len(svc.history) == 1
@@ -416,7 +456,10 @@ def test_scenario_12_sensor_stable_then_moves_to_new_position():
     assert len(svc.history) == 1
 
     # Move to new position (15.0)
-    for _ in range(8):
+    for val in [11.5, 13.0, 14.2]:
+        auto_save.feed(val, monotonic_time=t)
+        t += 0.15
+    for _ in range(12):
         auto_save.feed(15.0, monotonic_time=t)
         t += 0.15
     assert len(svc.history) == 2

@@ -93,10 +93,10 @@ class SerialReader:
         self._lock = threading.Lock()
 
     # ── connect ──────────────────────────────────────────────────────
-    def connect(self) -> None:
-        """Open the serial port (or start the simulator) and begin polling."""
+    def connect(self) -> bool:
+        """Open the serial port (or start the simulator) and begin polling. Returns True on success."""
         if self._running.is_set():
-            return  # already running
+            return True  # already running
 
         if not self.simulator:
             try:
@@ -129,11 +129,12 @@ class SerialReader:
             except serial.SerialException as exc:
                 if self.on_error:
                     self.on_error(f"Serial open error: {exc}")
-                return
+                return False
 
         self._running.set()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+        return True
 
     # ── disconnect ───────────────────────────────────────────────────
     def disconnect(self) -> None:
@@ -400,10 +401,10 @@ class EthernetReader:
         self._running = threading.Event()
         self._lock = threading.Lock()
 
-    def connect(self) -> None:
-        """Open TCP/IP socket connection and begin polling."""
+    def connect(self) -> bool:
+        """Open TCP/IP socket connection and begin polling. Returns True on success."""
         if self._running.is_set():
-            return
+            return True
 
         if not self.simulator:
             try:
@@ -438,11 +439,12 @@ class EthernetReader:
                     self._socket = None
                 if self.on_error:
                     self.on_error(f"Ethernet connection error ({self.host}:{self.port}): {exc}")
-                return
+                return False
 
         self._running.set()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+        return True
 
     def disconnect(self) -> None:
         """Stop polling and close the TCP socket."""

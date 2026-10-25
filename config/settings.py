@@ -37,6 +37,19 @@ AUTO_SAVE_REARM_THRESHOLD_DEG: float = 0.18
 REARM_THRESHOLD_DEG: float = 0.18          # alias for hybrid stability
 AUTO_SAVE_MIN_INTERVAL_SEC: float = 1.2    # minimum seconds between auto-saves (debounce)
 
+# ── Motion-Gated Stop Trigger (NAI API 8810A Live Stream) ───────────────
+# Tunable parameters for inferring mechanical movement cycle from angle readings:
+# (Derive final production values from actual machine recordings)
+MOTION_TRIGGER_MOVE_THRESH_DEG: float = 0.15     # Movement required to transition from WAITING_FOR_MOTION to MOVING
+MOTION_TRIGGER_STOP_WINDOW_SEC: float = 0.40     # Duration window of stillness required to propose STOP_CANDIDATE
+MOTION_TRIGGER_STOP_TOLERANCE_DEG: float = 0.045 # Max allowable spread in stop window to detect movement has ceased
+MOTION_TRIGGER_STOP_CONFIRM_SEC: float = 0.80    # Nonblocking dwell time in STOP_CANDIDATE before capture
+MOTION_TRIGGER_RESUME_THRESH_DEG: float = 0.08   # Angular movement in STOP_CANDIDATE that cancels timer & returns to MOVING
+MOTION_TRIGGER_REARM_THRESH_DEG: float = 0.18    # Angular change from saved angle required to arm next movement cycle
+MOTION_TRIGGER_BASELINE_SAMPLES: int = 5         # Initial valid samples required to establish stationary baseline
+MOTION_TRIGGER_MAX_GAP_SEC: float = 2.0          # Max gap between samples before invalidating reading
+
+
 # ── Excel Repository ───────────────────────────────────────────────────
 EXCEL_WRITE_MAX_RETRIES: int = 3
 EXCEL_WRITE_RETRY_DELAY_SEC: float = 0.8   # seconds between retries

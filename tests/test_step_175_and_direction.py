@@ -129,13 +129,24 @@ class TestAutoSaveStep174To176Transition:
             excel_service=mock_excel,
             stability_detector=detector,
             block_simulator_writes=False,
+            sync_save=True,
         )
         auto_save.direction = "CW"
         auto_save.enable()
 
         t = 0.0
-        # Step 174: Target ~ 2.05°
-        for _ in range(10):
+        # Initial baseline before motion
+        for _ in range(5):
+            auto_save.feed(2.50, monotonic_time=t)
+            t += 0.1
+
+        # Move to Step 174 (~2.05°)
+        for val in [2.40, 2.30, 2.20, 2.10]:
+            auto_save.feed(val, monotonic_time=t)
+            t += 0.1
+
+        # Step 174: Dwell & confirm stop at ~ 2.05°
+        for _ in range(15):
             auto_save.feed(2.05, monotonic_time=t)
             t += 0.1
         assert len(saved_records) == 1
@@ -148,24 +159,26 @@ class TestAutoSaveStep174To176Transition:
             t += 0.1
         assert len(saved_records) == 1
 
-        # Move to Step 175: 1.59° (delta = 0.46° > rearm 0.20°)
-        auto_save.feed(1.80, monotonic_time=t)
-        t += 0.1
+        # Move to Step 175: 1.59° (delta = 0.46° > rearm 0.18°)
+        for val in [1.90, 1.80, 1.70]:
+            auto_save.feed(val, monotonic_time=t)
+            t += 0.1
 
         # Reach Step 175: 1.59°
-        for _ in range(10):
+        for _ in range(15):
             auto_save.feed(1.59, monotonic_time=t)
             t += 0.1
         assert len(saved_records) == 2
         assert saved_records[1]["angle"] == 1.59
         assert saved_records[1]["direction"] == "CW"
 
-        # Move to Step 176: 1.34° (delta = 0.25° > rearm 0.20°)
-        auto_save.feed(1.45, monotonic_time=t)
-        t += 0.1
+        # Move to Step 176: 1.34° (delta = 0.25° > rearm 0.18°)
+        for val in [1.50, 1.40]:
+            auto_save.feed(val, monotonic_time=t)
+            t += 0.1
 
         # Reach Step 176: 1.34°
-        for _ in range(10):
+        for _ in range(15):
             auto_save.feed(1.34, monotonic_time=t)
             t += 0.1
         assert len(saved_records) == 3
